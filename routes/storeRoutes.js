@@ -8,6 +8,7 @@ router.use(authenticateToken);
 
 // Store CRUD routes
 router.get('/', storeController.getAllStores);
+router.get('/sales-staff', storeController.getSalesStaff);
 router.get('/:id', storeController.getStoreById);
 router.post('/', storeController.createStore);
 router.put('/:id', storeController.updateStore);

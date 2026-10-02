@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../database/db');
 const cloudinary = require('cloudinary').v2;
 const { authenticateToken } = require('../middleware/auth');
+const { listVanSales, getVanSale } = require('../controllers/vanSaleController');
 const {
   listExpenses: listStaffExpenses,
   updateExpenseStatus: updateStaffExpenseStatus
@@ -154,6 +155,8 @@ router.put('/skus/:skuId', authenticateToken, updateSku);
 router.delete('/skus/:skuId', authenticateToken, deleteSku);
 
 // Raw materials
+router.get('/van-sales', authenticateToken, listVanSales);
+router.get('/van-sales/:id', authenticateToken, getVanSale);
 router.get('/staff-expenses', authenticateToken, listStaffExpenses);
 router.patch('/staff-expenses/:id/status', authenticateToken, updateStaffExpenseStatus);
 router.get('/payment-collections', authenticateToken, listPaymentCollections);

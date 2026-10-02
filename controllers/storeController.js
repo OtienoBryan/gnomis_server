@@ -1,6 +1,43 @@
 const connection = require('../database/db');
 
+const SALES_STAFF_WHERE = "LOWER(TRIM(role)) = 'sales'";
+
+// Only a sales van can have staff assigned. Returns an error message, or null when the assignment is fine.
+// A staff member can only be assigned to one sales van (excludeStoreId is the store being edited).
+const checkStaffAssignment = async (storeType, staffId, excludeStoreId = null) => {
+  if (staffId === null || staffId === undefined || staffId === '') return null;
+  if (storeType !== 'sales_van') return 'Staff can only be assigned to a store of type Sales Van';
+  const [rows] = await connection.query(
+    `SELECT id, name FROM SalesRep WHERE id = ? AND ${SALES_STAFF_WHERE}`,
+    [staffId]
+  );
+  if (!rows.length) return 'The selected staff member is not a sales staff';
+
+  const [taken] = await connection.query(
+    'SELECT store_name FROM stores WHERE assigned_staff_id = ? AND id <> ? LIMIT 1',
+    [staffId, excludeStoreId || 0]
+  );
+  if (taken.length) return `${rows[0].name} is already assigned to ${taken[0].store_name}`;
+  return null;
+};
+
 const storeController = {
+  // Sales staff that can be assigned to a sales van
+  getSalesStaff: async (req, res) => {
+    try {
+      const [rows] = await connection.query(
+        `SELECT id, name, phoneNumber, region, route_name_update AS route_name
+         FROM SalesRep
+         WHERE ${SALES_STAFF_WHERE} AND status = 1
+         ORDER BY name ASC`
+      );
+      res.json({ success: true, data: rows });
+    } catch (error) {
+      console.error('Error fetching sales staff:', error);
+      res.status(500).json({ success: false, error: 'Failed to fetch sales staff' });
+    }
+  },
+
   // Get all stores
   getAllStores: async (req, res) => {
     try {
@@ -91,6 +128,11 @@ const storeController = {
           error: 'Store type must be storage or sales_van'
         });
       }
+      const assigned_staff_id = req.body.assigned_staff_id || null;
+      const staffError = await checkStaffAssignment(store_type, assigned_staff_id);
+      if (staffError) {
+        return res.status(400).json({ success: false, error: staffError });
+      }
 
       // Check if store_code already exists
       const [existingStores] = await connection.query(`
@@ -106,9 +148,9 @@ const storeController = {
 
       // Insert new store
       const [result] = await connection.query(`
-        INSERT INTO stores (store_name, store_code, store_type, location, address)
-        VALUES (?, ?, ?, ?, ?)
-      `, [store_name, store_code, store_type, location, address]);
+        INSERT INTO stores (store_name, store_code, store_type, assigned_staff_id, location, address)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `, [store_name, store_code, store_type, assigned_staff_id, location, address]);
 
       // Get the created store
       const [createdStores] = await connection.query(`
@@ -144,7 +186,7 @@ const storeController = {
 
       // Check if store exists
       const [existingStores] = await connection.query(`
-        SELECT id FROM stores WHERE id = ?
+        SELECT id, store_type FROM stores WHERE id = ?
       `, [id]);
 
       if (existingStores.length === 0) {
@@ -152,6 +194,14 @@ const storeController = {
           success: false,
           error: 'Store not found'
         });
+      }
+
+      // Staff can only be assigned to a sales van; any other type clears the assignment
+      const effectiveType = store_type || existingStores[0].store_type || 'storage';
+      const assigned_staff_id = effectiveType === 'sales_van' ? (req.body.assigned_staff_id || null) : null;
+      const staffError = await checkStaffAssignment(effectiveType, assigned_staff_id, id);
+      if (staffError) {
+        return res.status(400).json({ success: false, error: staffError });
       }
 
       // Check if store_code already exists (excluding current store)
@@ -174,11 +224,12 @@ const storeController = {
           store_name = ?,
           store_code = ?,
           store_type = COALESCE(?, store_type),
+          assigned_staff_id = ?,
           location = ?,
           address = ?,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-      `, [store_name, store_code, store_type, location, address, id]);
+      `, [store_name, store_code, store_type, assigned_staff_id, location, address, id]);
 
       // Get the updated store
       const [updatedStores] = await connection.query(`
