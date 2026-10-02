@@ -1,0 +1,1693 @@
+const express = require('express');
+const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const path = require('path');
+const http = require('http');
+const { Server } = require('socket.io');
+require('dotenv').config();
+
+// Import centralized authentication middleware
+const { authenticateToken, validateJWTSecret } = require('./middleware/auth');
+const auditTrailMiddleware = require('./middleware/auditTrailMiddleware');
+const AuditTrailService = require('./services/auditTrailService');
+
+// Validate JWT secret on startup
+validateJWTSecret();
+
+// Set timezone to UTC to ensure consistent time handling across environments
+process.env.TZ = 'UTC';
+process.env.NODE_TZ = 'UTC';
+
+// Try to require database and other modules, but don't crash if they fail
+let db, staffController, roleController, multer, upload, uploadController, teamController, clientController, branchController, serviceChargeController, journeyPlanController, payrollRoutes, financialRoutes, staffRoutes, chatRoutes, clientRoutes, salesRoutes, managerRoutes, noticeRoutes, salesRepLeaveRoutes, calendarTaskRoutes, userRoutes, loginHistoryRoutes, journeyPlanRoutes, riderRoutes, vehicleRoutes, userLocationRoutes, myVisibilityReportRoutes, feedbackReportRoutes, availabilityReportRoutes, shortExpiryReportRoutes, competitorActivityReportRoutes, priceComplianceReportRoutes, promotionsReportRoutes, leaveRequestRoutes, supplierRoutes, receiptRoutes, myAssetsRoutes, faultyProductsRoutes, storeRoutes, routesRoutes, upliftSaleRoutes, dashboardRoutes, customerOrdersRoutes, categoryRoutes, brandRoutes, outletAccountRoutes, brandSosTargetRoutes, planogramComplianceRoutes, assetPurchaseOrderRoutes, departmentExpenseRoutes, auditTrailRoutes, sosReportRoutes;
+
+try {
+  db = require('./database/db');
+  staffController = require('./controllers/staffController');
+  roleController = require('./controllers/roleController');
+  multer = require('multer');
+  upload = multer({ dest: 'uploads/' });
+  uploadController = require('./controllers/uploadController');
+  teamController = require('./controllers/teamController');
+  clientController = require('./controllers/clientController');
+  branchController = require('./controllers/branchController');
+  serviceChargeController = require('./controllers/serviceChargeController');
+  journeyPlanController = require('./controllers/journeyPlanController');
+  payrollRoutes = require('./routes/payrollRoutes');
+  financialRoutes = require('./routes/financialRoutes');
+  staffRoutes = require('./routes/staffRoutes');
+  chatRoutes = require('./routes/chatRoutes');
+  clientRoutes = require('./routes/clientRoutes');
+  salesRoutes = require('./routes/salesRoutes');
+  managerRoutes = require('./routes/managerRoutes');
+  noticeRoutes = require('./routes/noticeRoutes');
+  salesRepLeaveRoutes = require('./routes/leaveRoutes');
+  calendarTaskRoutes = require('./routes/calendarTaskRoutes');
+  userRoutes = require('./routes/userRoutes');
+  loginHistoryRoutes = require('./routes/loginHistoryRoutes');
+  journeyPlanRoutes = require('./routes/journeyPlanRoutes');
+  salesRepRoutes = require('./routes/salesRepRoutes');
+  visibilityReportRoutes = require('./routes/visibilityReportRoutes');
+  riderRoutes = require('./routes/riderRoutes');
+  vehicleRoutes = require('./routes/vehicleRoutes');
+  userLocationRoutes = require('./routes/userLocationRoutes');
+  myVisibilityReportRoutes = require('./routes/myVisibilityReportRoutes');
+  feedbackReportRoutes = require('./routes/feedbackReportRoutes');
+  availabilityReportRoutes = require('./routes/availabilityReportRoutes');
+  shortExpiryReportRoutes = require('./routes/shortExpiryReportRoutes');
+  competitorActivityReportRoutes = require('./routes/competitorActivityReportRoutes');
+  priceComplianceReportRoutes = require('./routes/priceComplianceReportRoutes');
+  promotionsReportRoutes = require('./routes/promotionsReportRoutes');
+  leaveRequestRoutes = require('./routes/leaveRequestRoutes');
+  supplierRoutes = require('./routes/supplierRoutes');
+  receiptRoutes = require('./routes/receiptRoutes');
+  myAssetsRoutes = require('./routes/myAssetsRoutes');
+  faultyProductsRoutes = require('./routes/faultyProductsRoutes');
+  storeRoutes = require('./routes/storeRoutes');
+  assetAssignmentRoutes = require('./routes/assetAssignmentRoutes');
+  merchandiseRoutes = require('./routes/merchandiseRoutes');
+  clientAssignmentRoutes = require('./routes/clientAssignmentRoutes');
+  routesRoutes = require('./routes/routesRoutes');
+  upliftSaleRoutes = require('./routes/upliftSaleRoutes');
+  dashboardRoutes = require('./routes/dashboardRoutes');
+  customerOrdersRoutes = require('./routes/customerOrdersRoutes');
+  categoryRoutes = require('./routes/categoryRoutes');
+  brandRoutes = require('./routes/brandRoutes');
+  outletAccountRoutes = require('./routes/outletAccountRoutes');
+  brandSosTargetRoutes = require('./routes/brandSosTargetRoutes');
+  planogramComplianceRoutes = require('./routes/planogramComplianceRoutes');
+  assetPurchaseOrderRoutes = require('./routes/assetPurchaseOrderRoutes');
+  departmentExpenseRoutes = require('./routes/departmentExpenseRoutes');
+  auditTrailRoutes = require('./routes/auditTrailRoutes');
+  sosReportRoutes = require('./routes/sosReportRoutes');
+} catch (error) {
+  console.log('Some modules failed to load:', error.message);
+}
+
+const app = express();
+
+// Move CORS middleware to the very top - TEMPORARILY ALLOW ALL ORIGINS
+const corsOptions = {
+  origin: true, // Allow all origins temporarily
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  optionsSuccessStatus: 200
+};
+app.use(cors(corsOptions));
+
+// Global error handler to prevent crashes
+app.use((err, req, res, next) => {
+  console.error('Error:', err);
+  res.status(500).json({ 
+    error: 'Internal server error', 
+    message: err.message,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Health check endpoint (no database required)
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'OK', 
+    message: 'Server is running', 
+    timestamp: new Date().toISOString() 
+  });
+});
+
+// Test endpoint
+app.get('/api/test', (req, res) => {
+  res.json({ message: 'API is working!', timestamp: new Date().toISOString() });
+});
+
+// Debug endpoint to check environment variables (PROTECTED)
+app.get('/api/debug', authenticateToken, (req, res) => {
+  // Only allow in non-production environments for extra security
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ 
+      error: 'Debug endpoint disabled in production',
+      timestamp: new Date().toISOString()
+    });
+  }
+  
+  res.json({
+    message: 'Debug info',
+    timestamp: new Date().toISOString(),
+    nodeEnv: process.env.NODE_ENV,
+    hasDbHost: !!process.env.DB_HOST,
+    hasDbUser: !!process.env.DB_USER,
+    hasDbPassword: !!process.env.DB_PASSWORD,
+    hasDbName: !!process.env.DB_NAME,
+    hasJwtSecret: !!process.env.JWT_SECRET,
+    envVars: Object.keys(process.env).filter(key => key.startsWith('DB_') || key.startsWith('JWT_') || key.startsWith('CLOUDINARY_')),
+    modulesLoaded: {
+      db: !!db,
+      staffController: !!staffController,
+      riderRoutes: !!riderRoutes,
+      financialRoutes: !!financialRoutes
+    }
+  });
+});
+
+// Middleware
+app.use(express.json());
+
+// Apply audit trail middleware to all API routes
+// This will log all authenticated API requests
+app.use('/api', auditTrailMiddleware({
+  excludePaths: ['/api/health', '/api/auth/login', '/api/auth/logout'],
+  excludeMethods: ['OPTIONS']
+}));
+
+// Only register routes if modules loaded successfully
+if (riderRoutes) {
+  app.use('/api/riders', riderRoutes);
+}
+if (vehicleRoutes) {
+  app.use('/api/vehicles', vehicleRoutes);
+}
+if (userLocationRoutes) {
+  app.use('/api/user-locations', userLocationRoutes);
+}
+
+// Serve static files from uploads directory
+app.use('/uploads', express.static('uploads'));
+app.use('/uploads/contracts', express.static(path.join(__dirname, 'uploads', 'contracts')));
+app.use('/uploads/termination_letters', express.static(path.join(__dirname, 'uploads', 'termination_letters')));
+app.use('/uploads/warning_letters', express.static(path.join(__dirname, 'uploads', 'warning_letters')));
+app.use('/uploads/products', express.static(path.join(__dirname, 'uploads', 'products')));
+
+// Register all specific endpoints FIRST
+if (myVisibilityReportRoutes) {
+  app.use('/api/my-visibility-reports', myVisibilityReportRoutes);
+}
+if (feedbackReportRoutes) {
+  app.use('/api/feedback-reports', feedbackReportRoutes);
+}
+if (availabilityReportRoutes) {
+  app.use('/api/availability-reports', availabilityReportRoutes);
+}
+if (shortExpiryReportRoutes) {
+  app.use('/api/short-expiry-reports', shortExpiryReportRoutes);
+}
+if (competitorActivityReportRoutes) {
+  app.use('/api/competitor-activity-reports', competitorActivityReportRoutes);
+}
+if (priceComplianceReportRoutes) {
+  app.use('/api/price-compliance-reports', priceComplianceReportRoutes);
+}
+if (promotionsReportRoutes) {
+  app.use('/api/promotions-reports', promotionsReportRoutes);
+}
+if (leaveRequestRoutes) {
+  app.use('/api/leave-requests', leaveRequestRoutes);
+}
+if (categoryRoutes) {
+  app.use('/api/categories', categoryRoutes);
+  console.log('Category routes registered successfully');
+}
+if (brandRoutes) {
+  app.use('/api/brands', brandRoutes);
+  console.log('Brand routes registered successfully');
+}
+if (outletAccountRoutes) {
+  app.use('/api/outlet-accounts', outletAccountRoutes);
+  console.log('Outlet account routes registered successfully');
+}
+if (brandSosTargetRoutes) {
+  app.use('/api/brand-sos-targets', brandSosTargetRoutes);
+  console.log('Brand SOS target routes registered successfully');
+}
+if (planogramComplianceRoutes) {
+  app.use('/api/planogram-compliance', planogramComplianceRoutes);
+  console.log('Planogram compliance routes registered successfully');
+}
+if (departmentExpenseRoutes) {
+  app.use('/api/department-expenses', departmentExpenseRoutes);
+}
+if (sosReportRoutes) {
+  app.use('/api/sos-reports', sosReportRoutes);
+  console.log('SOS report routes registered successfully');
+}
+
+// Helper function to map database fields to frontend fields
+const mapRequestFields = (request) => {
+  return {
+    id: request.id,
+    userId: request.user_id,
+    userName: request.user_name,
+    serviceTypeId: request.service_type_id,
+    pickupLocation: request.pickup_location,
+    deliveryLocation: request.delivery_location,
+    pickupDate: request.pickup_date,
+    description: request.description,
+    priority: request.priority,
+    status: request.status,
+    myStatus: request.my_status,
+    createdAt: request.created_at,
+    updatedAt: request.updated_at
+  };
+};
+
+// Auth routes
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    console.log('Login attempt received:', req.body);
+    const { username, password } = req.body;
+
+    if (!username || !password) {
+      console.log('Missing username or password');
+      return res.status(400).json({ message: 'Username and password are required' });
+    }
+
+    // Get staff from database by name
+    console.log('Querying database for staff by name:', username);
+    const [staff] = await db.query(
+      'SELECT * FROM staff WHERE name = ?',
+      [username]
+    );
+
+    console.log('Database query result:', staff);
+
+    if (staff.length === 0) {
+      console.log('No staff found with name:', username);
+      // Log failed login attempt
+      await AuditTrailService.logLogin(req, null, false, 'User not found');
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    const user = staff[0];
+
+    if (!user.password) {
+      console.log('No password set for this staff member:', username);
+      // Log failed login attempt
+      await AuditTrailService.logLogin(req, user, false, 'No password set');
+      return res.status(401).json({ message: 'No password set for this staff member' });
+    }
+
+    // Compare password
+    console.log('Comparing passwords...');
+    const isValidPassword = await bcrypt.compare(password, user.password);
+    console.log('Password comparison result:', isValidPassword);
+
+    if (!isValidPassword) {
+      console.log('Invalid password for staff:', username);
+      // Log failed login attempt
+      await AuditTrailService.logLogin(req, user, false, 'Invalid password');
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    // Create JWT token
+    console.log('Creating JWT token for staff:', username);
+    const token = jwt.sign(
+      { 
+        userId: user.id,
+        name: user.name,
+        role: user.role 
+      },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '24h' }
+    );
+
+    console.log('Login successful for staff:', username);
+    
+    // Log successful login
+    await AuditTrailService.logLogin(req, user, true);
+    
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.business_email,
+        role: user.role
+      }
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    // Log failed login attempt
+    await AuditTrailService.logLogin(req, null, false, error.message);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+// Service Types routes (protected)
+app.get('/api/service-types', authenticateToken, async (req, res) => {
+  try {
+    const [serviceTypes] = await db.query(
+      'SELECT * FROM service_types ORDER BY name'
+    );
+    res.json(serviceTypes);
+  } catch (error) {
+    console.error('Error fetching service types:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/service-types/:id', authenticateToken, async (req, res) => {
+  try {
+    const [serviceTypes] = await db.query(
+      'SELECT * FROM service_types WHERE id = ?',
+      [req.params.id]
+    );
+
+    if (serviceTypes.length === 0) {
+      return res.status(404).json({ message: 'Service type not found' });
+    }
+
+    res.json(serviceTypes[0]);
+  } catch (error) {
+    console.error('Error fetching service type:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+// Requests routes (protected)
+app.get('/api/requests', authenticateToken, async (req, res) => {
+  try {
+    const { status, myStatus } = req.query;
+    let query = 'SELECT * FROM requests';
+    const params = [];
+
+    // Add filters if provided
+    if (status || myStatus !== undefined) {
+      query += ' WHERE';
+      if (status) {
+        query += ' status = ?';
+        params.push(status);
+      }
+      if (myStatus !== undefined) {
+        if (status) query += ' AND';
+        query += ' my_status = ?';
+        params.push(myStatus);
+      }
+    }
+
+    query += ' ORDER BY created_at DESC';
+    
+    const [requests] = await db.query(query, params);
+    res.json(requests.map(mapRequestFields));
+  } catch (error) {
+    console.error('Error fetching requests:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.post('/api/requests', authenticateToken, async (req, res) => {
+  try {
+    const { 
+      userId, 
+      userName, 
+      serviceTypeId,
+      pickupLocation, 
+      deliveryLocation, 
+      pickupDate, 
+      description, 
+      priority,
+      myStatus = 0
+    } = req.body;
+
+    console.log('Received request data:', {
+      userId,
+      userName,
+      serviceTypeId,
+      pickupLocation,
+      deliveryLocation,
+      pickupDate,
+      description,
+      priority,
+      myStatus
+    });
+
+    // Validate required fields
+    if (!userId || !userName || !serviceTypeId || !pickupLocation || !deliveryLocation || !pickupDate) {
+      console.log('Missing required fields:', {
+        userId: !userId,
+        userName: !userName,
+        serviceTypeId: !serviceTypeId,
+        pickupLocation: !pickupLocation,
+        deliveryLocation: !deliveryLocation,
+        pickupDate: !pickupDate
+      });
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
+
+    // Check if service type exists
+    const [serviceTypes] = await db.query(
+      'SELECT id FROM service_types WHERE id = ?',
+      [serviceTypeId]
+    );
+
+    if (serviceTypes.length === 0) {
+      console.error('Service type not found:', serviceTypeId);
+      return res.status(400).json({ message: 'Invalid service type' });
+    }
+
+    // Check if staff exists
+    const [staff] = await db.query(
+      'SELECT id FROM staff WHERE id = ?',
+      [userId]
+    );
+
+    if (staff.length === 0) {
+      console.error('Staff not found:', userId);
+      return res.status(400).json({ message: 'Invalid staff member' });
+    }
+
+    // Insert request into database
+    const [result] = await db.query(
+      'INSERT INTO requests (user_id, user_name, service_type_id, pickup_location, delivery_location, pickup_date, description, priority, status, my_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [userId, userName, serviceTypeId, pickupLocation, deliveryLocation, pickupDate, description || null, priority || 'medium', 'pending', myStatus]
+    );
+
+    // Get the created request
+    const [requests] = await db.query(
+      'SELECT * FROM requests WHERE id = ?',
+      [result.insertId]
+    );
+
+    res.status(201).json(mapRequestFields(requests[0]));
+  } catch (error) {
+    console.error('Error creating request:', error);
+    console.error('Error details:', {
+      message: error.message,
+      code: error.code,
+      errno: error.errno,
+      sqlState: error.sqlState,
+      sqlMessage: error.sqlMessage,
+      stack: error.stack
+    });
+    res.status(500).json({ 
+      message: 'Internal server error',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+app.patch('/api/requests/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+
+    // Map frontend field names to database field names
+    const dbUpdates = {
+      user_name: updates.userName,
+      service_type_id: updates.serviceTypeId,
+      pickup_location: updates.pickupLocation,
+      delivery_location: updates.deliveryLocation,
+      pickup_date: updates.pickupDate,
+      description: updates.description,
+      priority: updates.priority,
+      status: updates.status,
+      my_status: updates.myStatus
+    };
+
+    // Remove undefined values
+    Object.keys(dbUpdates).forEach(key => 
+      dbUpdates[key] === undefined && delete dbUpdates[key]
+    );
+
+    // Build the SET clause dynamically based on provided updates
+    const setClause = Object.keys(dbUpdates)
+      .map(key => `${key} = ?`)
+      .join(', ');
+    
+    const values = [...Object.values(dbUpdates), id];
+
+    await db.query(
+      `UPDATE requests SET ${setClause} WHERE id = ?`,
+      values
+    );
+
+    // Get the updated request
+    const [requests] = await db.query(
+      'SELECT * FROM requests WHERE id = ?',
+      [id]
+    );
+
+    if (requests.length === 0) {
+      return res.status(404).json({ message: 'Request not found' });
+    }
+
+    res.json(mapRequestFields(requests[0]));
+  } catch (error) {
+    console.error('Error updating request:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+// Staff routes (protected)
+app.get('/api/staff', authenticateToken, staffController.getAllStaff);
+app.get('/api/staff/:id', authenticateToken, staffController.getStaffById);
+app.post('/api/staff', authenticateToken, staffController.createStaff);
+app.put('/api/staff/:id', authenticateToken, staffController.updateStaff);
+app.delete('/api/staff/:id', authenticateToken, staffController.deleteStaff);
+app.patch('/api/staff/:id/status', authenticateToken, staffController.updateStaffStatus);
+
+// Roles routes (protected)
+app.get('/api/roles', authenticateToken, roleController.getAllRoles);
+
+// Outlet accounts routes (protected)
+// Note: outletAccountRoutes will be registered below if available
+
+// Upload routes (protected)
+app.post('/api/upload', authenticateToken, upload.single('photo'), uploadController.uploadImage);
+
+// Team routes (protected)
+app.post('/api/teams', authenticateToken, teamController.createTeam);
+app.get('/api/teams', authenticateToken, teamController.getTeams);
+
+// Routes routes (must be registered before generic client routes to avoid conflict)
+if (routesRoutes) {
+  app.use('/api/routes', routesRoutes);
+}
+
+// Client routes (protected via middleware in clientRoutes)
+app.use('/api/clients', clientRoutes);
+app.get('/api/clients/:clientId/branches', authenticateToken, branchController.getAllBranches);
+app.post('/api/clients/:clientId/branches', authenticateToken, branchController.createBranch);
+app.put('/api/clients/:clientId/branches/:branchId', authenticateToken, branchController.updateBranch);
+app.delete('/api/clients/:clientId/branches/:branchId', authenticateToken, branchController.deleteBranch);
+app.get('/api/clients/:clientId/service-charges', authenticateToken, serviceChargeController.getServiceCharges);
+app.post('/api/clients/:clientId/service-charges', authenticateToken, serviceChargeController.createServiceCharge);
+app.put('/api/clients/:clientId/service-charges/:chargeId', authenticateToken, serviceChargeController.updateServiceCharge);
+app.delete('/api/clients/:clientId/service-charges/:chargeId', authenticateToken, serviceChargeController.deleteServiceCharge);
+
+// Journey Plan routes
+app.use('/api/journey-plans', journeyPlanRoutes);
+
+// Sales Representative routes
+app.use('/api/sales-reps', salesRepRoutes);
+
+// Client Assignment routes
+app.use('/api/client-assignments', clientAssignmentRoutes);
+
+// Visibility Report routes
+app.use('/api/visibility-reports', visibilityReportRoutes);
+
+
+
+// Financial System Routes
+console.log('Registering financial routes at /api/financial');
+app.use('/api/financial', financialRoutes);
+console.log('Financial routes registered successfully');
+app.use('/api/payroll', payrollRoutes);
+app.use('/api', staffRoutes);
+app.use('/api/chat', chatRoutes);
+app.use('/api/dashboard', dashboardRoutes);
+if (customerOrdersRoutes) {
+  app.use('/api/customer-orders', customerOrdersRoutes);
+  console.log('Customer orders routes registered successfully');
+}
+app.use('/api/managers', managerRoutes);
+app.use('/api/sales', salesRoutes);
+app.use('/api/notices', noticeRoutes);
+app.use('/api/login-history', loginHistoryRoutes);
+app.use('/api', supplierRoutes);
+app.use('/api', receiptRoutes);
+app.use('/api/my-assets', myAssetsRoutes);
+app.use('/api/faulty-products', faultyProductsRoutes);
+app.use('/api/stores', storeRoutes);
+app.use('/api/asset-assignments', assetAssignmentRoutes);
+app.use('/api/merchandise', merchandiseRoutes);
+if (assetPurchaseOrderRoutes) {
+  app.use('/api/asset-purchase-orders', assetPurchaseOrderRoutes);
+  console.log('Asset purchase order routes registered successfully');
+}
+
+app.use('/api/sales-rep-leaves', salesRepLeaveRoutes);
+app.use('/api/calendar-tasks', calendarTaskRoutes);
+app.use('/api/tasks', require('./routes/tasksRoutes'));
+app.use('/api/users', userRoutes);
+app.use('/api/uplift-sales', upliftSaleRoutes);
+if (auditTrailRoutes) {
+  app.use('/api/audit-trail', auditTrailRoutes);
+}
+
+// Visibility Reports route (protected)
+app.get('/api/visibility-reports', authenticateToken, async (req, res) => {
+  try {
+    console.log('Visibility reports route hit!');
+    
+    const { startDate, endDate, currentDate, page = 1, limit = 10, country, salesRep, search } = req.query;
+    const isViewAll = parseInt(limit) === -1;
+    const offset = isViewAll ? 0 : (parseInt(page) - 1) * parseInt(limit);
+    
+    let sql = `
+      SELECT vr.id, vr.reportId, vr.comment, vr.imageUrl, vr.createdAt,
+             c.name AS outlet, co.name AS country, u.name AS salesRep
+      FROM VisibilityReport vr
+      LEFT JOIN Clients c ON vr.clientId = c.id
+      LEFT JOIN Country co ON c.countryId = co.id
+      LEFT JOIN SalesRep u ON vr.userId = u.id
+    `;
+    
+    let countSql = `
+      SELECT COUNT(*) as total
+      FROM VisibilityReport vr
+      LEFT JOIN Clients c ON vr.clientId = c.id
+      LEFT JOIN Country co ON c.countryId = co.id
+      LEFT JOIN SalesRep u ON vr.userId = u.id
+    `;
+    
+    const params = [];
+    const countParams = [];
+    let whereConditions = [];
+    
+    // If currentDate is provided, filter by current date first
+    if (currentDate) {
+      whereConditions.push(`DATE(vr.createdAt) = ?`);
+      params.push(currentDate);
+      countParams.push(currentDate);
+    }
+    // If date range is provided, filter by date range
+    else if (startDate && endDate) {
+      whereConditions.push(`DATE(vr.createdAt) BETWEEN ? AND ?`);
+      params.push(startDate, endDate);
+      countParams.push(startDate, endDate);
+    }
+    // If only startDate is provided, filter from that date onwards
+    else if (startDate) {
+      whereConditions.push(`DATE(vr.createdAt) >= ?`);
+      params.push(startDate);
+      countParams.push(startDate);
+    }
+    // If only endDate is provided, filter up to that date
+    else if (endDate) {
+      whereConditions.push(`DATE(vr.createdAt) <= ?`);
+      params.push(endDate);
+      countParams.push(endDate);
+    }
+    
+    // Add country filter
+    if (country && country !== 'all') {
+      whereConditions.push(`co.name = ?`);
+      params.push(country);
+      countParams.push(country);
+    }
+    
+    // Add sales rep filter
+    if (salesRep && salesRep !== 'all') {
+      whereConditions.push(`u.name = ?`);
+      params.push(salesRep);
+      countParams.push(salesRep);
+    }
+    
+    // Add search filter
+    if (search && search.trim()) {
+      const searchTerm = `%${search.trim()}%`;
+      whereConditions.push(`(c.name LIKE ? OR co.name LIKE ? OR u.name LIKE ? OR vr.comment LIKE ?)`);
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+      countParams.push(searchTerm, searchTerm, searchTerm, searchTerm);
+    }
+    
+    // Add WHERE clause if there are conditions
+    if (whereConditions.length > 0) {
+      const whereClause = ` WHERE ${whereConditions.join(' AND ')}`;
+      sql += whereClause;
+      countSql += whereClause;
+    }
+    
+    sql += ` ORDER BY vr.createdAt DESC`;
+    
+    // Add LIMIT and OFFSET only if not viewing all
+    if (!isViewAll) {
+      sql += ` LIMIT ? OFFSET ?`;
+      params.push(parseInt(limit), offset);
+    }
+    
+    const [results] = await db.query(sql, params);
+    const [countResult] = await db.query(countSql, countParams);
+    const total = countResult[0].total;
+    
+    res.json({ 
+      success: true, 
+      data: results,
+      pagination: {
+        page: isViewAll ? 1 : parseInt(page),
+        limit: isViewAll ? total : parseInt(limit),
+        total,
+        totalPages: isViewAll ? 1 : Math.ceil(total / parseInt(limit))
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching visibility reports:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Visibility Reports CSV Export route (protected)
+app.get('/api/visibility-reports/export', authenticateToken, async (req, res) => {
+  try {
+    console.log('Visibility reports CSV export route hit!');
+    
+    const { startDate, endDate, currentDate, country, salesRep, search } = req.query;
+    
+    let sql = `
+      SELECT vr.id, vr.reportId, vr.comment, vr.imageUrl, vr.createdAt,
+             c.name AS outlet, co.name AS country, u.name AS salesRep
+      FROM VisibilityReport vr
+      LEFT JOIN Clients c ON vr.clientId = c.id
+      LEFT JOIN Country co ON c.countryId = co.id
+      LEFT JOIN SalesRep u ON vr.userId = u.id
+    `;
+    
+    const params = [];
+    let whereConditions = [];
+    
+    // If currentDate is provided, filter by current date first
+    if (currentDate) {
+      whereConditions.push(`DATE(vr.createdAt) = ?`);
+      params.push(currentDate);
+    }
+    // If date range is provided, filter by date range
+    else if (startDate && endDate) {
+      whereConditions.push(`DATE(vr.createdAt) BETWEEN ? AND ?`);
+      params.push(startDate, endDate);
+    }
+    // If only startDate is provided, filter from that date onwards
+    else if (startDate) {
+      whereConditions.push(`DATE(vr.createdAt) >= ?`);
+      params.push(startDate);
+    }
+    // If only endDate is provided, filter up to that date
+    else if (endDate) {
+      whereConditions.push(`DATE(vr.createdAt) <= ?`);
+      params.push(endDate);
+    }
+    
+    // Add country filter
+    if (country && country !== 'all') {
+      whereConditions.push(`co.name = ?`);
+      params.push(country);
+    }
+    
+    // Add sales rep filter
+    if (salesRep && salesRep !== 'all') {
+      whereConditions.push(`u.name = ?`);
+      params.push(salesRep);
+    }
+    
+    // Add search filter
+    if (search && search.trim()) {
+      const searchTerm = `%${search.trim()}%`;
+      whereConditions.push(`(c.name LIKE ? OR co.name LIKE ? OR u.name LIKE ? OR vr.comment LIKE ?)`);
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+    }
+    
+    // Add WHERE clause if there are conditions
+    if (whereConditions.length > 0) {
+      sql += ` WHERE ${whereConditions.join(' AND ')}`;
+    }
+    
+    sql += ` ORDER BY vr.createdAt DESC`;
+    
+    const [results] = await db.query(sql, params);
+    
+    // Create CSV header information
+    const exportDate = new Date().toLocaleDateString('en-US', { 
+      weekday: 'long', 
+      year: 'numeric', 
+      month: 'long', 
+      day: 'numeric' 
+    });
+    
+    let filterDate;
+    if (currentDate) {
+      filterDate = new Date(currentDate).toLocaleDateString('en-US', { 
+        weekday: 'long', 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric' 
+      });
+    } else if (startDate && endDate) {
+      const start = new Date(startDate).toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        year: 'numeric' 
+      });
+      const end = new Date(endDate).toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        year: 'numeric' 
+      });
+      filterDate = startDate === endDate ? start : `${start} - ${end}`;
+    } else if (startDate) {
+      filterDate = `From ${new Date(startDate).toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        year: 'numeric' 
+      })}`;
+    } else if (endDate) {
+      filterDate = `Until ${new Date(endDate).toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        year: 'numeric' 
+      })}`;
+    } else {
+      filterDate = 'All Dates';
+    }
+    
+    const reportCount = results.length;
+    
+    // Create CSV content with header information
+    const csvHeader = [
+      ['Visibility Reports Export'],
+      [''],
+      ['Export Date:', exportDate],
+      ['Filter Date:', filterDate],
+      ['Filter Country:', country && country !== 'all' ? country : 'All Countries'],
+      ['Filter Sales Rep:', salesRep && salesRep !== 'all' ? salesRep : 'All Sales Reps'],
+      ['Filter Search:', search && search.trim() ? search.trim() : 'No Search'],
+      ['Total Reports:', reportCount.toString()],
+      [''],
+      ['ID', 'Report ID', 'Outlet', 'Country', 'Sales Rep', 'Comment', 'Image URL', 'Created At']
+    ];
+    
+    const csvData = results.map(row => [
+      row.id,
+      row.reportId,
+      row.outlet || 'N/A',
+      row.country || 'N/A',
+      row.salesRep || 'N/A',
+      row.comment || 'N/A',
+      row.imageUrl || 'N/A',
+      new Date(row.createdAt).toLocaleString()
+    ]);
+    
+    const csvContent = [...csvHeader, ...csvData]
+      .map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+    
+    // Set headers for CSV download
+    const filename = `visibility-reports-${new Date().toISOString().split('T')[0]}.csv`;
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    
+    res.send(csvContent);
+  } catch (err) {
+    console.error('Error exporting visibility reports:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Get available countries for filtering (protected)
+app.get('/api/countries', authenticateToken, async (req, res) => {
+  try {
+    console.log('Countries route hit!');
+    
+    const sql = `
+      SELECT DISTINCT co.id, co.name
+      FROM Country co
+      INNER JOIN Clients c ON c.countryId = co.id
+      INNER JOIN VisibilityReport vr ON vr.clientId = c.id
+      ORDER BY co.name ASC
+    `;
+    
+    const [results] = await db.query(sql);
+    res.json({ success: true, data: results });
+  } catch (err) {
+    console.error('Error fetching countries:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/regions', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT name FROM Regions ORDER BY name');
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Get available sales reps for filtering (protected)
+app.get('/api/sales-reps', authenticateToken, async (req, res) => {
+  try {
+    console.log('Sales reps route hit!');
+    
+    const sql = `
+      SELECT DISTINCT u.id, u.name
+      FROM SalesRep u
+      INNER JOIN VisibilityReport vr ON vr.userId = u.id
+      WHERE u.status = 1
+      ORDER BY u.name ASC
+    `;
+    
+    const [results] = await db.query(sql);
+    res.json({ success: true, data: results });
+  } catch (err) {
+    console.error('Error fetching sales reps:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Feedback Reports route (protected)
+app.get('/api/feedback-reports', authenticateToken, async (req, res) => {
+  try {
+    console.log('Feedback reports route hit!');
+    
+    const { startDate, endDate, currentDate, page = 1, limit = 10, outlet, salesRep, search } = req.query;
+    const isViewAll = parseInt(limit) === -1;
+    const offset = isViewAll ? 0 : (parseInt(page) - 1) * parseInt(limit);
+    
+    let sql = `
+      SELECT fr.id, fr.reportId, fr.comment, fr.createdAt,
+             c.name AS outlet, co.name AS country, u.name AS salesRep
+      FROM FeedbackReport fr
+      LEFT JOIN Clients c ON fr.clientId = c.id
+      LEFT JOIN Country co ON c.countryId = co.id
+      LEFT JOIN SalesRep u ON fr.userId = u.id
+    `;
+    
+    let countSql = `
+      SELECT COUNT(*) as total
+      FROM FeedbackReport fr
+      LEFT JOIN Clients c ON fr.clientId = c.id
+      LEFT JOIN Country co ON c.countryId = co.id
+      LEFT JOIN SalesRep u ON fr.userId = u.id
+    `;
+    
+    const params = [];
+    const countParams = [];
+    let whereConditions = [];
+    
+    // If currentDate is provided, filter by current date first
+    if (currentDate) {
+      whereConditions.push(`DATE(fr.createdAt) = ?`);
+      params.push(currentDate);
+      countParams.push(currentDate);
+    }
+    // If date range is provided, filter by date range
+    else if (startDate && endDate) {
+      whereConditions.push(`DATE(fr.createdAt) BETWEEN ? AND ?`);
+      params.push(startDate, endDate);
+      countParams.push(startDate, endDate);
+    }
+    // If only startDate is provided, filter from that date onwards
+    else if (startDate) {
+      whereConditions.push(`DATE(fr.createdAt) >= ?`);
+      params.push(startDate);
+      countParams.push(startDate);
+    }
+    // If only endDate is provided, filter up to that date
+    else if (endDate) {
+      whereConditions.push(`DATE(fr.createdAt) <= ?`);
+      params.push(endDate);
+      countParams.push(endDate);
+    }
+    
+    // Add outlet filter
+    if (outlet && outlet !== 'all') {
+      whereConditions.push(`c.name = ?`);
+      params.push(outlet);
+      countParams.push(outlet);
+    }
+    
+    // Add sales rep filter
+    if (salesRep && salesRep !== 'all') {
+      whereConditions.push(`u.name = ?`);
+      params.push(salesRep);
+      countParams.push(salesRep);
+    }
+    
+    // Add search filter
+    if (search && search.trim()) {
+      const searchTerm = `%${search.trim()}%`;
+      whereConditions.push(`(c.name LIKE ? OR co.name LIKE ? OR u.name LIKE ? OR fr.comment LIKE ?)`);
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+      countParams.push(searchTerm, searchTerm, searchTerm, searchTerm);
+    }
+    
+    // Add WHERE clause if there are conditions
+    if (whereConditions.length > 0) {
+      const whereClause = ` WHERE ${whereConditions.join(' AND ')}`;
+      sql += whereClause;
+      countSql += whereClause;
+    }
+    
+    sql += ` ORDER BY fr.createdAt DESC`;
+    
+    // Add LIMIT and OFFSET only if not viewing all
+    if (!isViewAll) {
+      sql += ` LIMIT ? OFFSET ?`;
+      params.push(parseInt(limit), offset);
+    }
+    
+    const [results] = await db.query(sql, params);
+    const [countResult] = await db.query(countSql, countParams);
+    const total = countResult[0].total;
+    
+    res.json({ 
+      success: true, 
+      data: results,
+      pagination: {
+        page: isViewAll ? 1 : parseInt(page),
+        limit: isViewAll ? total : parseInt(limit),
+        total,
+        totalPages: isViewAll ? 1 : Math.ceil(total / parseInt(limit))
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching feedback reports:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Feedback Reports CSV Export route (protected)
+app.get('/api/feedback-reports/export', authenticateToken, async (req, res) => {
+  try {
+    console.log('Feedback reports CSV export route hit!');
+    
+    const { startDate, endDate, currentDate, outlet, salesRep, search } = req.query;
+    
+    let sql = `
+      SELECT fr.id, fr.reportId, fr.comment, fr.createdAt,
+             c.name AS outlet, co.name AS country, u.name AS salesRep
+      FROM FeedbackReport fr
+      LEFT JOIN Clients c ON fr.clientId = c.id
+      LEFT JOIN Country co ON c.countryId = co.id
+      LEFT JOIN SalesRep u ON fr.userId = u.id
+    `;
+    
+    const params = [];
+    let whereConditions = [];
+    
+    // If currentDate is provided, filter by current date first
+    if (currentDate) {
+      whereConditions.push(`DATE(fr.createdAt) = ?`);
+      params.push(currentDate);
+    }
+    // If date range is provided, filter by date range
+    else if (startDate && endDate) {
+      whereConditions.push(`DATE(fr.createdAt) BETWEEN ? AND ?`);
+      params.push(startDate, endDate);
+    }
+    // If only startDate is provided, filter from that date onwards
+    else if (startDate) {
+      whereConditions.push(`DATE(fr.createdAt) >= ?`);
+      params.push(startDate);
+    }
+    // If only endDate is provided, filter up to that date
+    else if (endDate) {
+      whereConditions.push(`DATE(fr.createdAt) <= ?`);
+      params.push(endDate);
+    }
+    
+    // Add outlet filter
+    if (outlet && outlet !== 'all') {
+      whereConditions.push(`c.name = ?`);
+      params.push(outlet);
+    }
+    
+    // Add sales rep filter
+    if (salesRep && salesRep !== 'all') {
+      whereConditions.push(`u.name = ?`);
+      params.push(salesRep);
+    }
+    
+    // Add search filter
+    if (search && search.trim()) {
+      const searchTerm = `%${search.trim()}%`;
+      whereConditions.push(`(c.name LIKE ? OR co.name LIKE ? OR u.name LIKE ? OR fr.comment LIKE ?)`);
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+    }
+    
+    // Add WHERE clause if there are conditions
+    if (whereConditions.length > 0) {
+      sql += ` WHERE ${whereConditions.join(' AND ')}`;
+    }
+    
+    sql += ` ORDER BY fr.createdAt DESC`;
+    
+    const [results] = await db.query(sql, params);
+    
+    // Create CSV header information
+    const exportDate = new Date().toLocaleDateString('en-US', { 
+      weekday: 'long', 
+      year: 'numeric', 
+      month: 'long', 
+      day: 'numeric' 
+    });
+    
+    let filterDate;
+    if (currentDate) {
+      filterDate = new Date(currentDate).toLocaleDateString('en-US', { 
+        weekday: 'long', 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric' 
+      });
+    } else if (startDate && endDate) {
+      const start = new Date(startDate).toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        year: 'numeric' 
+      });
+      const end = new Date(endDate).toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        year: 'numeric' 
+      });
+      filterDate = startDate === endDate ? start : `${start} - ${end}`;
+    } else if (startDate) {
+      filterDate = `From ${new Date(startDate).toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        year: 'numeric' 
+      })}`;
+    } else if (endDate) {
+      filterDate = `Until ${new Date(endDate).toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        year: 'numeric' 
+      })}`;
+    } else {
+      filterDate = 'All Dates';
+    }
+    
+    const reportCount = results.length;
+    
+    // Create CSV content with header information
+    const csvHeader = [
+      ['Feedback Reports Export'],
+      [''],
+      ['Export Date:', exportDate],
+      ['Filter Date:', filterDate],
+      ['Filter Country:', country && country !== 'all' ? country : 'All Countries'],
+      ['Filter Sales Rep:', salesRep && salesRep !== 'all' ? salesRep : 'All Sales Reps'],
+      ['Filter Search:', search && search.trim() ? search.trim() : 'No Search'],
+      ['Total Reports:', reportCount.toString()],
+      [''],
+      ['Outlet', 'Country', 'Sales Rep', 'Comment', 'Date']
+    ];
+    
+    const csvData = results.map(row => [
+      row.outlet || 'N/A',
+      row.country || 'N/A',
+      row.salesRep || 'N/A',
+      row.comment || 'N/A',
+      new Date(row.createdAt).toLocaleString()
+    ]);
+    
+    const csvContent = [...csvHeader, ...csvData]
+      .map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+    
+    // Set headers for CSV download
+    const filename = `feedback-reports-${new Date().toISOString().split('T')[0]}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    
+    // Add BOM for Excel compatibility and send CSV
+    const csvWithBOM = '\ufeff' + csvContent;
+    res.send(csvWithBOM);
+  } catch (err) {
+    console.error('Error exporting feedback reports:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Get available countries for feedback filtering (protected)
+app.get('/api/feedback-countries', authenticateToken, async (req, res) => {
+  try {
+    console.log('Feedback countries route hit!');
+    
+    const sql = `
+      SELECT DISTINCT co.id, co.name
+      FROM Country co
+      INNER JOIN Clients c ON c.countryId = co.id
+      INNER JOIN FeedbackReport fr ON fr.clientId = c.id
+      ORDER BY co.name ASC
+    `;
+    
+    const [results] = await db.query(sql);
+    res.json({ success: true, data: results });
+  } catch (err) {
+    console.error('Error fetching feedback countries:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Get available sales reps for feedback filtering (protected)
+app.get('/api/feedback-sales-reps', authenticateToken, async (req, res) => {
+  try {
+    console.log('Feedback sales reps route hit!');
+    
+    let sql = `
+      SELECT DISTINCT u.id, u.name
+      FROM SalesRep u
+      INNER JOIN FeedbackReport fr ON fr.userId = u.id
+      WHERE u.status = 1
+    `;
+    
+    const params = [];
+    
+    // Filter by leader_id if user role is leader
+    if (req.user && req.user.role && req.user.role.toLowerCase() === 'leader') {
+      sql += ` AND u.leader_id = ?`;
+      params.push(req.user.id);
+    }
+    
+    sql += ` ORDER BY u.name ASC`;
+    
+    const [results] = await db.query(sql, params);
+    res.json({ success: true, data: results });
+  } catch (err) {
+    console.error('Error fetching feedback sales reps:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Get available outlets for feedback filtering (protected)
+app.get('/api/feedback-outlets', authenticateToken, async (req, res) => {
+  try {
+    console.log('Feedback outlets route hit!');
+    
+    const sql = `
+      SELECT DISTINCT c.id, c.name
+      FROM Clients c
+      INNER JOIN FeedbackReport fr ON fr.clientId = c.id
+      ORDER BY c.name ASC
+    `;
+    
+    const [results] = await db.query(sql);
+    res.json({ success: true, data: results });
+  } catch (err) {
+    console.error('Error fetching feedback outlets:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Availability Reports CSV Export route (protected)
+app.get('/api/availability-reports/export', authenticateToken, async (req, res) => {
+  try {
+    console.log('Availability reports CSV export route hit!');
+    
+    const { startDate, endDate, currentDate, outlet, comment, country, salesRep, search } = req.query;
+    
+    let sql = `
+      SELECT pr.id, pr.reportId, pr.productName, pr.quantity, pr.comment, pr.createdAt,
+             c.name AS clientName, co.name AS countryName, u.name AS salesRepName
+      FROM ProductReport pr
+      LEFT JOIN Clients c ON pr.clientId = c.id
+      LEFT JOIN Country co ON c.countryId = co.id
+      LEFT JOIN SalesRep u ON pr.userId = u.id
+    `;
+    
+    const params = [];
+    let whereConditions = [];
+    
+    // If currentDate is provided, filter by current date first
+    if (currentDate) {
+      whereConditions.push(`DATE(pr.createdAt) = ?`);
+      params.push(currentDate);
+    }
+    // If date range is provided, filter by date range
+    else if (startDate && endDate) {
+      whereConditions.push(`DATE(pr.createdAt) BETWEEN ? AND ?`);
+      params.push(startDate, endDate);
+    }
+    // If only startDate is provided, filter from that date onwards
+    else if (startDate) {
+      whereConditions.push(`DATE(pr.createdAt) >= ?`);
+      params.push(startDate);
+    }
+    // If only endDate is provided, filter up to that date
+    else if (endDate) {
+      whereConditions.push(`DATE(pr.createdAt) <= ?`);
+      params.push(endDate);
+    }
+    
+    // Add outlet filter
+    if (outlet && outlet.trim()) {
+      whereConditions.push(`c.name LIKE ?`);
+      params.push(`%${outlet.trim()}%`);
+    }
+    
+    // Add comment filter
+    if (comment && comment.trim()) {
+      whereConditions.push(`pr.comment LIKE ?`);
+      params.push(`%${comment.trim()}%`);
+    }
+    
+    // Add country filter
+    if (country && country !== 'all') {
+      whereConditions.push(`co.name = ?`);
+      params.push(country);
+    }
+    
+    // Add sales rep filter
+    if (salesRep && salesRep !== 'all') {
+      whereConditions.push(`u.name = ?`);
+      params.push(salesRep);
+    }
+    
+    // Add search filter
+    if (search && search.trim()) {
+      const searchTerm = `%${search.trim()}%`;
+      whereConditions.push(`(c.name LIKE ? OR co.name LIKE ? OR u.name LIKE ? OR pr.comment LIKE ? OR pr.productName LIKE ?)`);
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
+    }
+    
+    // Add WHERE clause if there are conditions
+    if (whereConditions.length > 0) {
+      sql += ` WHERE ${whereConditions.join(' AND ')}`;
+    }
+    
+    sql += ` ORDER BY pr.createdAt DESC`;
+    
+    const [results] = await db.query(sql, params);
+    
+    // Create CSV header information
+    const exportDate = new Date().toLocaleDateString('en-US', { 
+      weekday: 'long', 
+      year: 'numeric', 
+      month: 'long', 
+      day: 'numeric' 
+    });
+    
+    let filterDate;
+    if (currentDate) {
+      filterDate = new Date(currentDate).toLocaleDateString('en-US', { 
+        weekday: 'long', 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric' 
+      });
+    } else if (startDate && endDate) {
+      const start = new Date(startDate).toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        year: 'numeric' 
+      });
+      const end = new Date(endDate).toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        year: 'numeric' 
+      });
+      filterDate = startDate === endDate ? start : `${start} - ${end}`;
+    } else if (startDate) {
+      filterDate = `From ${new Date(startDate).toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        year: 'numeric' 
+      })}`;
+    } else if (endDate) {
+      filterDate = `Until ${new Date(endDate).toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        year: 'numeric' 
+      })}`;
+    } else {
+      filterDate = 'All Dates';
+    }
+    
+    const reportCount = results.length;
+    
+    // Create CSV content with header information
+    const csvHeader = [
+      ['Availability Reports Export'],
+      [''],
+      ['Export Date:', exportDate],
+      ['Filter Date:', filterDate],
+      ['Filter Outlet:', outlet && outlet.trim() ? outlet.trim() : 'All Outlets'],
+      ['Filter Comment:', comment && comment.trim() ? comment.trim() : 'All Comments'],
+      ['Filter Country:', country && country !== 'all' ? country : 'All Countries'],
+      ['Filter Sales Rep:', salesRep && salesRep !== 'all' ? salesRep : 'All Sales Reps'],
+      ['Filter Search:', search && search.trim() ? search.trim() : 'No Search'],
+      ['Total Reports:', reportCount.toString()],
+      [''],
+      ['ID', 'Report ID', 'Product Name', 'Quantity', 'Client', 'Country', 'Sales Rep', 'Comment', 'Created At']
+    ];
+    
+    const csvData = results.map(row => [
+      row.id,
+      row.reportId,
+      row.productName || 'N/A',
+      row.quantity || 'N/A',
+      row.clientName || 'N/A',
+      row.countryName || 'N/A',
+      row.salesRepName || 'N/A',
+      row.comment || 'N/A',
+      new Date(row.createdAt).toLocaleString()
+    ]);
+    
+    const csvContent = [...csvHeader, ...csvData]
+      .map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+    
+    // Set headers for CSV download
+    const filename = `availability-reports-${new Date().toISOString().split('T')[0]}.csv`;
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    
+    res.send(csvContent);
+  } catch (err) {
+    console.error('Error exporting availability reports:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Get available countries for availability filtering (protected)
+app.get('/api/availability-countries', authenticateToken, async (req, res) => {
+  try {
+    console.log('Availability countries route hit!');
+    
+    const sql = `
+      SELECT DISTINCT co.name
+      FROM Country co
+      INNER JOIN Clients c ON c.countryId = co.id
+      INNER JOIN ProductReport pr ON pr.clientId = c.id
+      ORDER BY co.name ASC
+    `;
+    
+    const [results] = await db.query(sql);
+    const countries = results.map(row => row.name);
+    res.json(countries);
+  } catch (err) {
+    console.error('Error fetching availability countries:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Get available sales reps for availability filtering (protected)
+app.get('/api/availability-sales-reps', authenticateToken, async (req, res) => {
+  try {
+    console.log('Availability sales reps route hit!');
+    
+    let sql = `
+      SELECT DISTINCT u.name
+      FROM SalesRep u
+      INNER JOIN ProductReport pr ON pr.userId = u.id
+      WHERE u.status = 1
+    `;
+    
+    const params = [];
+    
+    // Filter by leader_id if user role is leader
+    if (req.user && req.user.role && req.user.role.toLowerCase() === 'leader') {
+      sql += ` AND u.leader_id = ?`;
+      params.push(req.user.id);
+    }
+    
+    sql += ` ORDER BY u.name ASC`;
+    
+    const [results] = await db.query(sql, params);
+    const salesReps = results.map(row => row.name);
+    res.json(salesReps);
+  } catch (err) {
+    console.error('Error fetching availability sales reps:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Example API endpoint
+app.get('/api/test', (req, res) => {
+  db.query('SELECT 1 + 1 AS solution')
+    .then(([results]) => {
+      res.json({ message: 'Database connection successful', results });
+    })
+    .catch(err => {
+      res.status(500).json({ error: err.message });
+    });
+});
+
+// Test sales orders endpoint removed for security
+// Use /api/health or /api/test for basic server health checks instead
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ message: 'Something went wrong!' });
+});
+
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: [
+      'https://woosh-client.vercel.app',
+      'http://localhost:5173',
+      'http://localhost:3000'
+    ],
+    methods: ['GET', 'POST'],
+    credentials: true
+  }
+});
+
+// Socket.IO chat logic with enhanced logging and error handling
+io.on('connection', (socket) => {
+  console.log('✅ New socket connection:', socket.id);
+
+  // Join a chat room
+  socket.on('joinRoom', (roomId) => {
+    socket.join(`room_${roomId}`);
+    console.log(`📥 Socket ${socket.id} joined room_${roomId}`);
+    socket.emit('roomJoined', { roomId, success: true });
+  });
+
+  // Leave a chat room
+  socket.on('leaveRoom', (roomId) => {
+    socket.leave(`room_${roomId}`);
+    console.log(`📤 Socket ${socket.id} left room_${roomId}`);
+  });
+
+  // Handle sending a message - optimized for instant delivery
+  socket.on('sendMessage', async (data) => {
+    // data: { roomId, message, sender_id, sender_name, sentAt }
+    try {
+      console.log(`💬 Message received from socket ${socket.id} for room ${data.roomId}`);
+      
+      // Save to database
+      const [result] = await db.query(
+        'INSERT INTO chat_messages (room_id, sender_id, message) VALUES (?, ?, ?)',
+        [data.roomId, data.sender_id, data.message]
+      );
+      
+      // Fetch the saved message with sender_name and sent_at
+      const [rows] = await db.query(
+        `SELECT m.*, s.name as sender_name FROM chat_messages m JOIN staff s ON m.sender_id = s.id WHERE m.id = ?`,
+        [result.insertId]
+      );
+      
+      if (rows && rows.length > 0) {
+        const savedMsg = rows[0];
+        console.log(`✉️  Broadcasting message ${savedMsg.id} to room_${data.roomId}`);
+        
+        // Broadcast to all clients in the room (including sender for confirmation)
+        io.to(`room_${data.roomId}`).emit('newMessage', savedMsg);
+        
+        // Send confirmation to sender
+        socket.emit('messageSent', { messageId: savedMsg.id, success: true });
+      } else {
+        console.error('❌ Failed to fetch saved message');
+        socket.emit('messageError', { error: 'Failed to fetch saved message' });
+      }
+    } catch (err) {
+      console.error('❌ Socket sendMessage error:', err);
+      socket.emit('messageError', { error: err.message });
+    }
+  });
+
+  // Handle editing a message
+  socket.on('editMessage', async (data) => {
+    try {
+      const { messageId, message, userId } = data;
+      
+      // Verify ownership
+      const [[msg]] = await db.query('SELECT * FROM chat_messages WHERE id = ?', [messageId]);
+      if (!msg) {
+        socket.emit('editError', { error: 'Message not found' });
+        return;
+      }
+      if (msg.sender_id !== userId) {
+        socket.emit('editError', { error: 'Not authorized' });
+        return;
+      }
+      
+      // Update message
+      await db.query('UPDATE chat_messages SET message = ? WHERE id = ?', [message, messageId]);
+      
+      // Broadcast update to room
+      io.to(`room_${msg.room_id}`).emit('messageEdited', {
+        messageId,
+        message,
+        room_id: msg.room_id
+      });
+      
+      console.log(`✏️  Message ${messageId} edited in room_${msg.room_id}`);
+    } catch (err) {
+      console.error('❌ Socket editMessage error:', err);
+      socket.emit('editError', { error: err.message });
+    }
+  });
+
+  // Handle deleting a message
+  socket.on('deleteMessage', async (data) => {
+    try {
+      const { messageId, userId } = data;
+      
+      // Verify ownership
+      const [[msg]] = await db.query('SELECT * FROM chat_messages WHERE id = ?', [messageId]);
+      if (!msg) {
+        socket.emit('deleteError', { error: 'Message not found' });
+        return;
+      }
+      if (msg.sender_id !== userId) {
+        socket.emit('deleteError', { error: 'Not authorized' });
+        return;
+      }
+      
+      // Delete message
+      await db.query('DELETE FROM chat_messages WHERE id = ?', [messageId]);
+      
+      // Broadcast deletion to room
+      io.to(`room_${msg.room_id}`).emit('messageDeleted', {
+        messageId,
+        room_id: msg.room_id
+      });
+      
+      console.log(`🗑️  Message ${messageId} deleted from room_${msg.room_id}`);
+    } catch (err) {
+      console.error('❌ Socket deleteMessage error:', err);
+      socket.emit('deleteError', { error: err.message });
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log('🔌 Socket disconnected:', socket.id);
+  });
+
+  socket.on('error', (error) => {
+    console.error('⚠️  Socket error:', error);
+  });
+});
+
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  
+  // Setup daily sales rep checkout at 11:00 PM
+  try {
+    const cron = require('node-cron');
+    const checkoutSalesReps = require('./checkout-sales-reps-daily');
+    
+    // Schedule daily checkout at 11:00 PM (23:00) - cron format: minute hour day month dayOfWeek
+    // This runs every day at 11:00 PM
+    cron.schedule('0 23 * * *', async () => {
+      console.log('\n⏰ Scheduled sales rep checkout triggered at 11:00 PM');
+      await checkoutSalesReps();
+    }, {
+      scheduled: true,
+      timezone: 'UTC' // Use UTC timezone to match server timezone setting
+    });
+    
+    console.log('✅ Daily sales rep checkout scheduled for 11:00 PM (UTC)');
+  } catch (error) {
+    console.error('⚠️  Failed to setup scheduled sales rep checkout:', error.message);
+    console.error('   The checkout script can still be run manually: node server/checkout-sales-reps-daily.js');
+  }
+});
+
+module.exports = app; 

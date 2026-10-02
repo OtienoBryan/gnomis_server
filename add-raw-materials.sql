@@ -1,0 +1,12 @@
+-- Migration: raw materials master list
+CREATE TABLE IF NOT EXISTS raw_materials (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  unit VARCHAR(50) NOT NULL,
+  cost DECIMAL(11,2) NOT NULL,
+  alert_qty DECIMAL(12,2) NOT NULL DEFAULT 0,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_raw_materials_name (name)
+);

@@ -1,0 +1,859 @@
+const db = require('../database/db');
+const { recalcProductCosts } = require('./rawMaterialController');
+
+const purchaseOrderController = {
+  // Get all purchase orders
+  getAllPurchaseOrders: async (req, res) => {
+    try {
+      const { supplier_id, outstanding } = req.query;
+      const whereParts = [];
+      const params = [];
+      if (supplier_id) {
+        whereParts.push('po.supplier_id = ?');
+        params.push(supplier_id);
+      }
+      const whereSql = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
+
+      let rows;
+      try {
+        const havingSql = (outstanding && (outstanding === 'true' || outstanding === '1')) ? 'HAVING (po.total_amount - amount_paid) > 0' : '';
+        [rows] = await db.query(`
+          SELECT 
+            po.*,
+            s.company_name as supplier_name,
+            s.supplier_code as supplier_code,
+            s.address as supplier_address,
+            s.tax_id as supplier_tax_id,
+            COALESCE(u.full_name, u.name, u.username, 'Unknown') as created_by_name,
+            (
+              SELECT COALESCE(SUM(amount), 0)
+              FROM payments
+              WHERE payments.purchase_order_id = po.id AND payments.status = 'confirmed'
+            ) as amount_paid
+          FROM purchase_orders po
+          LEFT JOIN suppliers s ON po.supplier_id = s.id
+          LEFT JOIN users u ON po.created_by = u.id
+          ${whereSql}
+          ${havingSql}
+          ORDER BY po.created_at DESC
+        `, params);
+      } catch (err) {
+        // Fallback for legacy schemas without payments.purchase_order_id or payments.status
+        console.warn('Falling back to legacy PO query (no payments join):', err?.message);
+        const fallbackHaving = (outstanding && (outstanding === 'true' || outstanding === '1')) ? 'HAVING (po.total_amount) > 0' : '';
+        try {
+          [rows] = await db.query(`
+            SELECT 
+              po.*,
+              s.company_name as supplier_name,
+              s.supplier_code as supplier_code,
+              s.address as supplier_address,
+              s.tax_id as supplier_tax_id,
+              COALESCE(u.full_name, u.name, u.username, 'Unknown') as created_by_name
+            FROM purchase_orders po
+            LEFT JOIN suppliers s ON po.supplier_id = s.id
+            LEFT JOIN users u ON po.created_by = u.id
+            ${whereSql}
+            ${fallbackHaving}
+            ORDER BY po.created_at DESC
+          `, params);
+          // Mark amount_paid = 0 in fallback
+          rows = rows.map(r => ({ ...r, amount_paid: 0 }));
+        } catch (fallbackErr) {
+          // Final fallback - query without users join if users table doesn't exist or has issues
+          console.warn('Falling back to minimal PO query (no users join):', fallbackErr?.message);
+          [rows] = await db.query(`
+            SELECT 
+              po.*,
+              s.company_name as supplier_name,
+              s.supplier_code as supplier_code,
+              s.address as supplier_address,
+              s.tax_id as supplier_tax_id,
+              'Unknown' as created_by_name
+            FROM purchase_orders po
+            LEFT JOIN suppliers s ON po.supplier_id = s.id
+            ${whereSql}
+            ${fallbackHaving}
+            ORDER BY po.created_at DESC
+          `, params);
+          // Mark amount_paid = 0 in final fallback
+          rows = rows.map(r => ({ ...r, amount_paid: 0 }));
+        }
+      }
+
+      // Add balance_remaining field
+      let data = rows.map(po => ({
+        ...po,
+        balance_remaining: Number(po.total_amount) - Number(po.amount_paid || 0)
+      }));
+
+      // No extra in-memory filter; SQL HAVING applies only when outstanding=true
+
+      res.json({ success: true, data });
+    } catch (error) {
+      console.error('Error fetching purchase orders:', error);
+      console.error('Error stack:', error.stack);
+      console.error('Error message:', error.message);
+      res.status(500).json({ 
+        success: false, 
+        error: 'Failed to fetch purchase orders',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  },
+
+  // Get purchase order by ID
+  getPurchaseOrderById: async (req, res) => {
+    try {
+      const { id } = req.params;
+      
+      // Get purchase order details
+      const [purchaseOrders] = await db.query(`
+        SELECT 
+          po.*,
+          s.company_name as supplier_name,
+          s.supplier_code as supplier_code,
+          u.full_name as created_by_name
+        FROM purchase_orders po
+        LEFT JOIN suppliers s ON po.supplier_id = s.id
+        LEFT JOIN users u ON po.created_by = u.id
+        WHERE po.id = ?
+      `, [id]);
+      
+      if (purchaseOrders.length === 0) {
+        return res.status(404).json({ success: false, error: 'Purchase order not found' });
+      }
+
+      // Get purchase order items
+      const [items] = await db.query(`
+        SELECT 
+          poi.*,
+          COALESCE(p.product_name, rm.name) AS product_name,
+          p.product_code,
+          COALESCE(p.unit_of_measure, rm.unit) AS unit_of_measure
+        FROM purchase_order_items poi
+        LEFT JOIN products p ON poi.product_id = p.id
+        LEFT JOIN raw_materials rm ON poi.raw_material_id = rm.id
+        WHERE poi.purchase_order_id = ?
+      `, [id]);
+
+      const purchaseOrder = purchaseOrders[0];
+      purchaseOrder.items = items;
+      
+      res.json({ success: true, data: purchaseOrder });
+    } catch (error) {
+      console.error('Error fetching purchase order:', error);
+      res.status(500).json({ success: false, error: 'Failed to fetch purchase order' });
+    }
+  },
+
+  // Create new purchase order
+  createPurchaseOrder: async (req, res) => {
+    const connection = await db.getConnection();
+    
+    try {
+      await connection.beginTransaction();
+      
+      const { 
+        supplier_id, 
+        order_date, 
+        expected_delivery_date, 
+        notes, 
+        items 
+      } = req.body;
+
+      if (!Array.isArray(items) || items.length === 0 || items.some(it => !it.product_id && !it.raw_material_id)) {
+        await connection.rollback();
+        return res.status(400).json({ success: false, error: 'Each item needs a product or raw material' });
+      }
+
+      // Generate PO number
+      const [poCount] = await connection.query('SELECT COUNT(*) as count FROM purchase_orders');
+      const poNumber = `PO-${String(poCount[0].count + 1).padStart(6, '0')}`;
+
+      // Calculate totals using per-item tax type (default 16% when not provided)
+      // Client sends tax-inclusive unit_price. Convert to net/tax per line here.
+      const calcLine = (it) => {
+        const taxType = (it.tax_type || '16%');
+        const rate = taxType === '16%' ? 0.16 : 0;
+        const grossUnit = Number(it.unit_price);
+        const qty = Number(it.quantity);
+        const grossLine = qty * grossUnit;
+        const netUnit = rate > 0 ? grossUnit / (1 + rate) : grossUnit;
+        const netLine = qty * netUnit;
+        const taxLine = grossLine - netLine;
+        return { netLine, taxLine, taxType, grossLine, netUnit };
+      };
+
+      const subtotal = items.reduce((sum, it) => sum + calcLine(it).netLine, 0);
+      const taxAmount = items.reduce((sum, it) => sum + calcLine(it).taxLine, 0);
+      const totalAmount = subtotal + taxAmount;
+
+      // Create purchase order
+      const [poResult] = await connection.query(`
+        INSERT INTO purchase_orders (
+          po_number, supplier_id, order_date, expected_delivery_date, 
+          subtotal, tax_amount, total_amount, notes, created_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [poNumber, supplier_id, order_date, expected_delivery_date, subtotal, taxAmount, totalAmount, notes, 1]);
+
+      const purchaseOrderId = poResult.insertId;
+
+      // Create purchase order items (store per-item tax as well if columns exist). Persist unit_price/total_price as tax-inclusive.
+      for (const item of items) {
+        const { netLine, taxLine, taxType, grossLine } = calcLine(item);
+        // Try inserting with tax columns; if it fails (older schema), fallback without them
+        try {
+          await connection.query(`
+            INSERT INTO purchase_order_items (
+              purchase_order_id, product_id, raw_material_id, quantity, unit_price, total_price, tax_amount, tax_type
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `, [purchaseOrderId, item.product_id || null, item.raw_material_id || null, item.quantity, item.unit_price, grossLine, taxLine, taxType]);
+        } catch (e) {
+          await connection.query(`
+            INSERT INTO purchase_order_items (
+              purchase_order_id, product_id, raw_material_id, quantity, unit_price, total_price
+            ) VALUES (?, ?, ?, ?, ?, ?)
+          `, [purchaseOrderId, item.product_id || null, item.raw_material_id || null, item.quantity, item.unit_price, grossLine]);
+        }
+      }
+
+      await connection.commit();
+
+      // Get the created purchase order
+      const [createdPO] = await db.query(`
+        SELECT 
+          po.*,
+          s.company_name as supplier_name,
+          s.supplier_code as supplier_code,
+          s.address as supplier_address,
+          s.tax_id as supplier_tax_id
+        FROM purchase_orders po
+        LEFT JOIN suppliers s ON po.supplier_id = s.id
+        WHERE po.id = ?
+      `, [purchaseOrderId]);
+
+      res.status(201).json({ 
+        success: true, 
+        data: createdPO[0],
+        message: 'Purchase order created successfully' 
+      });
+    } catch (error) {
+      await connection.rollback();
+      console.error('Error creating purchase order:', error);
+      res.status(500).json({ success: false, error: 'Failed to create purchase order' });
+    } finally {
+      connection.release();
+    }
+  },
+
+  // Update purchase order
+  updatePurchaseOrder: async (req, res) => {
+    const connection = await db.getConnection();
+    
+    try {
+      await connection.beginTransaction();
+      
+      const { id } = req.params;
+      const { 
+        supplier_id, 
+        order_date, 
+        expected_delivery_date, 
+        notes, 
+        items 
+      } = req.body;
+
+      // Check if purchase order exists
+      const [existingPO] = await connection.query('SELECT id FROM purchase_orders WHERE id = ?', [id]);
+      if (existingPO.length === 0) {
+        return res.status(404).json({ success: false, error: 'Purchase order not found' });
+      }
+
+      // Client sends tax-inclusive unit_price. Convert to net/tax per line here.
+      const calcLine = (it) => {
+        const taxType = (it.tax_type || '16%');
+        const rate = taxType === '16%' ? 0.16 : 0;
+        const grossUnit = Number(it.unit_price);
+        const qty = Number(it.quantity);
+        const grossLine = qty * grossUnit;
+        const netUnit = rate > 0 ? grossUnit / (1 + rate) : grossUnit;
+        const netLine = qty * netUnit;
+        const taxLine = grossLine - netLine;
+        return { netLine, taxLine, taxType, grossLine, netUnit };
+      };
+
+      const subtotal = items.reduce((sum, it) => sum + calcLine(it).netLine, 0);
+      const taxAmount = items.reduce((sum, it) => sum + calcLine(it).taxLine, 0);
+      const totalAmount = subtotal + taxAmount;
+
+      // Update purchase order
+      await connection.query(`
+        UPDATE purchase_orders 
+        SET supplier_id = ?, order_date = ?, expected_delivery_date = ?, 
+            subtotal = ?, tax_amount = ?, total_amount = ?, notes = ?
+        WHERE id = ?
+      `, [supplier_id, order_date, expected_delivery_date, subtotal, taxAmount, totalAmount, notes, id]);
+
+      // Delete existing items
+      await connection.query('DELETE FROM purchase_order_items WHERE purchase_order_id = ?', [id]);
+
+      // Create new items (store per-item tax as well if columns exist). Persist unit_price/total_price as tax-inclusive.
+      for (const item of items) {
+        const { netLine, taxLine, taxType, grossLine } = calcLine(item);
+        try {
+          await connection.query(`
+            INSERT INTO purchase_order_items (
+              purchase_order_id, product_id, raw_material_id, quantity, unit_price, total_price, tax_amount, tax_type
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `, [id, item.product_id || null, item.raw_material_id || null, item.quantity, item.unit_price, grossLine, taxLine, taxType]);
+        } catch (e) {
+          await connection.query(`
+            INSERT INTO purchase_order_items (
+              purchase_order_id, product_id, raw_material_id, quantity, unit_price, total_price
+            ) VALUES (?, ?, ?, ?, ?, ?)
+          `, [id, item.product_id || null, item.raw_material_id || null, item.quantity, item.unit_price, grossLine]);
+        }
+      }
+
+      await connection.commit();
+
+      res.json({ success: true, message: 'Purchase order updated successfully' });
+    } catch (error) {
+      await connection.rollback();
+      console.error('Error updating purchase order:', error);
+      res.status(500).json({ success: false, error: 'Failed to update purchase order' });
+    } finally {
+      connection.release();
+    }
+  },
+
+  // Delete purchase order
+  deletePurchaseOrder: async (req, res) => {
+    const connection = await db.getConnection();
+    
+    try {
+      await connection.beginTransaction();
+      
+      const { id } = req.params;
+
+      // Check if purchase order exists
+      const [existingPO] = await connection.query('SELECT id FROM purchase_orders WHERE id = ?', [id]);
+      if (existingPO.length === 0) {
+        return res.status(404).json({ success: false, error: 'Purchase order not found' });
+      }
+
+      // Delete items first
+      await connection.query('DELETE FROM purchase_order_items WHERE purchase_order_id = ?', [id]);
+
+      // Delete purchase order
+      await connection.query('DELETE FROM purchase_orders WHERE id = ?', [id]);
+
+      await connection.commit();
+
+      res.json({ success: true, message: 'Purchase order deleted successfully' });
+    } catch (error) {
+      await connection.rollback();
+      console.error('Error deleting purchase order:', error);
+      res.status(500).json({ success: false, error: 'Failed to delete purchase order' });
+    } finally {
+      connection.release();
+    }
+  },
+
+  // Update purchase order status
+  updateStatus: async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status } = req.body;
+
+      // A purchase order that has been (even partly) received can no longer be cancelled:
+      // stock, the supplier ledger and journal entries have already been posted for it.
+      if (status === 'cancelled') {
+        const [[po]] = await db.query('SELECT status FROM purchase_orders WHERE id = ?', [id]);
+        if (!po) {
+          return res.status(404).json({ success: false, error: 'Purchase order not found' });
+        }
+        const [[received]] = await db.query(
+          'SELECT COALESCE(SUM(received_quantity), 0) AS total_received FROM purchase_order_items WHERE purchase_order_id = ?',
+          [id]
+        );
+        if (['received', 'partially_received'].includes(po.status) || Number(received.total_received) > 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'A purchase order that has been received cannot be cancelled'
+          });
+        }
+      }
+
+      const [result] = await db.query(
+        'UPDATE purchase_orders SET status = ? WHERE id = ?',
+        [status, id]
+      );
+
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ success: false, error: 'Purchase order not found' });
+      }
+
+      res.json({ success: true, message: 'Purchase order status updated successfully' });
+    } catch (error) {
+      console.error('Error updating purchase order status:', error);
+      res.status(500).json({ success: false, error: 'Failed to update purchase order status' });
+    }
+  },
+
+  // Receive items into store inventory
+  receiveItems: async (req, res) => {
+    const connection = await db.getConnection();
+    
+    try {
+      await connection.beginTransaction();
+      
+      const { purchaseOrderId } = req.params;
+      const { storeId, items, notes } = req.body; // items: [{product_id, received_quantity, unit_cost}]
+
+      // Verify purchase order exists
+      const [purchaseOrders] = await connection.query(
+        'SELECT * FROM purchase_orders WHERE id = ?',
+        [purchaseOrderId]
+      );
+
+      if (purchaseOrders.length === 0) {
+        return res.status(404).json({ success: false, error: 'Purchase order not found' });
+      }
+
+      // Verify store exists
+      const [stores] = await connection.query(
+        'SELECT * FROM stores WHERE id = ? AND is_active = true',
+        [storeId]
+      );
+
+      if (stores.length === 0) {
+        return res.status(404).json({ success: false, error: 'Store not found' });
+      }
+
+      // Get PO items to calculate correct tax-exclusive unit costs
+      const [poItemsForInventory] = await connection.query(`
+        SELECT product_id, raw_material_id, tax_type, unit_price 
+        FROM purchase_order_items 
+        WHERE purchase_order_id = ?
+      `, [purchaseOrderId]);
+
+      // A received line refers to either a raw material or a product
+      const isSameItem = (poi, it) =>
+        it.raw_material_id
+          ? Number(poi.raw_material_id) === Number(it.raw_material_id)
+          : poi.product_id === it.product_id;
+
+      // Process each received item
+      for (const item of items) {
+        const { product_id, raw_material_id, received_quantity } = item;
+        
+        // Find matching PO item to get correct pricing
+        const poItem = poItemsForInventory.find(poi => isSameItem(poi, item));
+        if (!poItem) {
+          throw new Error(`PO item not found for ${raw_material_id ? `raw material ${raw_material_id}` : `product ${product_id}`}`);
+        }
+        
+        const taxType = poItem.tax_type || '16%';
+        const taxRate = taxType === '16%' ? 0.16 : 0;
+        const poUnitPrice = parseFloat(poItem.unit_price) || 0;
+        
+        // Calculate tax-exclusive unit cost from PO's tax-inclusive unit_price
+        const taxExclusiveUnitCost = taxRate > 0 
+          ? poUnitPrice / (1 + taxRate) 
+          : poUnitPrice;
+        
+        const total_cost = received_quantity * taxExclusiveUnitCost;
+
+        if (raw_material_id) {
+          // Raw material: record stock in on the raw material ledger for the receiving store
+          await connection.query(`
+            INSERT INTO raw_material_transactions (
+              raw_material_id, store_id, transaction_date, type, quantity, reference, notes, created_by
+            ) VALUES (?, ?, CURDATE(), 'in', ?, ?, ?, ?)
+          `, [raw_material_id, storeId, received_quantity, purchaseOrders[0].po_number, notes || null, req.user?.id || null]);
+
+          // Keep the raw material's cost in line with the latest purchase (tax-exclusive)
+          await connection.query('UPDATE raw_materials SET cost = ? WHERE id = ?', [taxExclusiveUnitCost.toFixed(2), raw_material_id]);
+          await recalcProductCosts(connection, { rawMaterialId: raw_material_id });
+
+          await connection.query(`
+            UPDATE purchase_order_items
+            SET received_quantity = received_quantity + ?
+            WHERE purchase_order_id = ? AND raw_material_id = ?
+          `, [received_quantity, purchaseOrderId, raw_material_id]);
+          continue;
+        }
+
+
+        // Update product cost_price in the products table with the new cost
+        await connection.query(`
+          UPDATE products 
+          SET cost_price = ? 
+          WHERE id = ?
+        `, [taxExclusiveUnitCost, product_id]);
+
+        // Record the receipt (use tax-exclusive unit cost)
+        await connection.query(`
+          INSERT INTO inventory_receipts (
+            purchase_order_id, product_id, store_id, received_quantity, 
+            unit_cost, total_cost, received_by, notes
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `, [purchaseOrderId, product_id, storeId, received_quantity, taxExclusiveUnitCost, total_cost, 1, notes]);
+
+        // Update store inventory (running balance)
+        await connection.query(`
+          INSERT INTO store_inventory (store_id, product_id, quantity) 
+          VALUES (?, ?, ?) 
+          ON DUPLICATE KEY UPDATE 
+          quantity = quantity + ?
+        `, [storeId, product_id, received_quantity, received_quantity]);
+
+        // --- Insert into inventory_transactions ---
+        // Get last balance for this product/store
+        const [lastTrans] = await connection.query(
+          'SELECT balance FROM inventory_transactions WHERE product_id = ? AND store_id = ? ORDER BY date_received DESC, id DESC LIMIT 1',
+          [product_id, storeId]
+        );
+        const prevBalance = lastTrans.length > 0 ? parseFloat(lastTrans[0].balance) : 0;
+        const newBalance = prevBalance + received_quantity;
+        await connection.query(
+          `INSERT INTO inventory_transactions 
+            (product_id, reference, amount_in, amount_out, unit_cost, total_cost, balance, date_received, store_id, staff_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?)`,
+          [product_id, purchaseOrders[0].po_number, received_quantity, 0, taxExclusiveUnitCost, total_cost, newBalance, storeId, 1]
+        );
+        // --- End inventory_transactions insert ---
+
+        // Update purchase order item received quantity
+        await connection.query(`
+          UPDATE purchase_order_items 
+          SET received_quantity = received_quantity + ? 
+          WHERE purchase_order_id = ? AND product_id = ?
+        `, [received_quantity, purchaseOrderId, product_id]);
+      }
+
+      // Check if all items are fully received
+      const [orderItems] = await connection.query(`
+        SELECT 
+          SUM(quantity) as total_ordered,
+          SUM(received_quantity) as total_received
+        FROM purchase_order_items 
+        WHERE purchase_order_id = ?
+      `, [purchaseOrderId]);
+
+      const { total_ordered, total_received } = orderItems[0];
+      
+      // Update purchase order status if fully received
+      if (total_received >= total_ordered) {
+        await connection.query(
+          'UPDATE purchase_orders SET status = ? WHERE id = ?',
+          ['received', purchaseOrderId]
+        );
+      } else {
+        await connection.query(
+          'UPDATE purchase_orders SET status = ? WHERE id = ?',
+          ['partially_received', purchaseOrderId]
+        );
+      }
+
+      // Calculate tax amount and tax-exclusive value for received items
+      // Get the purchase order items to determine tax type and calculate tax correctly
+      const [poItems] = await connection.query(`
+        SELECT product_id, raw_material_id, tax_type, tax_amount, quantity, unit_price 
+        FROM purchase_order_items 
+        WHERE purchase_order_id = ?
+      `, [purchaseOrderId]);
+
+      console.log('========================================');
+      console.log('📦 RECEIVING ITEMS - JOURNAL ENTRY CALCULATION');
+      console.log('========================================');
+      console.log('PO ID:', purchaseOrderId);
+      console.log('PO Number:', purchaseOrders[0].po_number);
+      console.log('Items being received:', JSON.stringify(items, null, 2));
+      console.log('PO Items from database:', JSON.stringify(poItems, null, 2));
+
+      let totalReceiptValue = 0; // Tax-exclusive amount
+      let totalTaxAmount = 0;
+      
+      for (const receivedItem of items) {
+        // Find matching PO item
+        const poItem = poItems.find(poi => isSameItem(poi, receivedItem));
+        if (poItem) {
+          const taxType = poItem.tax_type || '16%';
+          const taxRate = taxType === '16%' ? 0.16 : 0;
+          
+          // Use PO item's tax-inclusive unit_price to calculate tax correctly
+          // PO unit_price is tax-inclusive (as stored when creating PO)
+          const poUnitPrice = parseFloat(poItem.unit_price) || 0;
+          const receivedQty = receivedItem.received_quantity;
+          
+          // Calculate tax-inclusive amount for received quantity using PO's unit_price
+          const itemTaxInclusiveAmount = receivedQty * poUnitPrice;
+          
+          // Calculate tax-exclusive amount from tax-inclusive
+          const itemTaxExclusiveAmount = taxRate > 0 
+            ? itemTaxInclusiveAmount / (1 + taxRate) 
+            : itemTaxInclusiveAmount;
+          
+          // Calculate tax amount
+          const itemTaxAmount = itemTaxInclusiveAmount - itemTaxExclusiveAmount;
+          
+          console.log(`\n--- Product ID: ${receivedItem.product_id} ---`);
+          console.log(`Received Quantity: ${receivedQty}`);
+          console.log(`PO Unit Price (tax-inclusive): ${poUnitPrice.toFixed(2)}`);
+          console.log(`Tax Type: ${taxType}, Tax Rate: ${(taxRate * 100).toFixed(0)}%`);
+          console.log(`Item Tax-Inclusive Amount: ${itemTaxInclusiveAmount.toFixed(2)}`);
+          console.log(`Item Tax-Exclusive Amount: ${itemTaxExclusiveAmount.toFixed(2)}`);
+          console.log(`Item Tax Amount: ${itemTaxAmount.toFixed(2)}`);
+          
+          // Accumulate totals using PO's original pricing (ensures accuracy)
+          totalReceiptValue += itemTaxExclusiveAmount;
+          totalTaxAmount += itemTaxAmount;
+        }
+      }
+
+      // Total amount including tax for accounts payable and supplier ledger
+      const totalAmountWithTax = totalReceiptValue + totalTaxAmount;
+      
+      console.log('\n========= JOURNAL ENTRY TOTALS =========');
+      console.log(`Total Tax-Exclusive (Inventory Debit): ${totalReceiptValue.toFixed(2)}`);
+      console.log(`Total Tax Amount (Tax Control Debit): ${totalTaxAmount.toFixed(2)}`);
+      console.log(`Total With Tax (Accounts Payable Credit): ${totalAmountWithTax.toFixed(2)}`);
+      console.log('========================================\n');
+
+      // Get supplier_id from purchase order
+      const supplier_id = purchaseOrders[0].supplier_id;
+      const po_number = purchaseOrders[0].po_number;
+
+      // Set invoice_number on purchase order if not already set
+      if (!purchaseOrders[0].invoice_number) {
+        const invRef = `INV-${String(purchaseOrderId).padStart(6, '0')}`;
+        await connection.query('UPDATE purchase_orders SET invoice_number = ? WHERE id = ?', [invRef, purchaseOrderId]);
+      }
+
+      // Insert into supplier_ledger (credit, increases balance) - use total with tax
+      // Get last running balance
+      const [lastLedger] = await connection.query(
+        'SELECT running_balance FROM supplier_ledger WHERE supplier_id = ? ORDER BY date DESC, id DESC LIMIT 1',
+        [supplier_id]
+      );
+      const prevBalance = lastLedger.length > 0 ? parseFloat(lastLedger[0].running_balance) : 0;
+      const newBalance = prevBalance + totalAmountWithTax;
+      await connection.query(
+        `INSERT INTO supplier_ledger (supplier_id, date, description, reference_type, reference_id, debit, credit, running_balance)
+         VALUES (?, NOW(), ?, ?, ?, ?, ?, ?)`,
+        [
+          supplier_id,
+          `Goods received for PO ${po_number}`,
+          'purchase_order',
+          purchaseOrderId,
+          0,
+          totalAmountWithTax,
+          newBalance
+        ]
+      );
+
+      // Update Accounts Payable in chart_of_accounts (account_code '2000')
+      await connection.query(
+        `UPDATE chart_of_accounts SET 
+          updated_at = NOW(),
+          description = CONCAT(description, ' | Last PO received: ', ?)
+         WHERE account_code = '2000'`,
+        [po_number]
+      );
+
+      // Create a journal entry: Debit Inventory (tax-exclusive), Debit Purchase Tax Control, Credit Accounts Payable (total with tax)
+      // Get account IDs
+      const [inventoryAccount] = await connection.query(
+        `SELECT id FROM chart_of_accounts WHERE account_code = '100001' LIMIT 1`
+      );
+      const [apAccount] = await connection.query(
+        `SELECT id FROM chart_of_accounts WHERE account_code = '210000' LIMIT 1`
+      );
+      // Purchase Tax Control Account ID (as per financialController.js)
+      const vatAccountId = 16;
+
+      if (inventoryAccount.length && apAccount.length) {
+        console.log('\n💾 INSERTING JOURNAL ENTRY INTO DATABASE...');
+        console.log('Inventory Account ID:', inventoryAccount[0].id);
+        console.log('AP Account ID:', apAccount[0].id);
+        console.log('VAT Account ID:', vatAccountId);
+        
+        console.log('\n📝 Journal Entry Header Values:');
+        console.log(`  total_debit: ${totalAmountWithTax}`);
+        console.log(`  total_credit: ${totalAmountWithTax}`);
+        
+        // Create journal entry with total including tax
+        const [journalResult] = await connection.query(
+          `INSERT INTO journal_entries (entry_number, entry_date, reference, description, total_debit, total_credit, status, created_by)
+           VALUES (?, CURDATE(), ?, ?, ?, ?, 'posted', ?)`,
+          [
+            `JE-PO-${purchaseOrderId}-${Date.now()}`,
+            po_number,
+            `Goods received for PO ${po_number}`,
+            totalAmountWithTax,
+            totalAmountWithTax,
+            1 // created_by (system/admin)
+          ]
+        );
+        const journalEntryId = journalResult.insertId;
+        console.log(`✅ Journal Entry Created with ID: ${journalEntryId}`);
+        
+        console.log('\n📝 Journal Entry Lines:');
+        console.log(`  1. Debit Inventory (${inventoryAccount[0].id}): ${totalReceiptValue.toFixed(2)}`);
+        
+        // Debit Inventory (tax-exclusive amount)
+        await connection.query(
+          `INSERT INTO journal_entry_lines (journal_entry_id, account_id, debit_amount, credit_amount, description)
+           VALUES (?, ?, ?, 0, ?)`,
+          [journalEntryId, inventoryAccount[0].id, totalReceiptValue, `Inventory - Goods received for PO ${po_number}`]
+        );
+        
+        // Debit Purchase Tax Control (tax amount) if there's tax
+        if (totalTaxAmount > 0) {
+          console.log(`  2. Debit Purchase Tax Control (${vatAccountId}): ${totalTaxAmount.toFixed(2)}`);
+          await connection.query(
+            `INSERT INTO journal_entry_lines (journal_entry_id, account_id, debit_amount, credit_amount, description)
+             VALUES (?, ?, ?, 0, ?)`,
+            [journalEntryId, vatAccountId, totalTaxAmount, `Purchase Tax Control - PO ${po_number}`]
+          );
+        }
+        
+        console.log(`  3. Credit Accounts Payable (${apAccount[0].id}): ${totalAmountWithTax.toFixed(2)}`);
+        
+        // Credit Accounts Payable (total with tax)
+        await connection.query(
+          `INSERT INTO journal_entry_lines (journal_entry_id, account_id, debit_amount, credit_amount, description)
+           VALUES (?, ?, 0, ?, ?)`,
+          [journalEntryId, apAccount[0].id, totalAmountWithTax, `Accounts Payable - Goods received for PO ${po_number}`]
+        );
+        
+        console.log('✅ All journal entry lines inserted successfully!');
+        
+        // Verify what was actually inserted
+        const [insertedLines] = await connection.query(
+          `SELECT account_id, debit_amount, credit_amount, description 
+           FROM journal_entry_lines 
+           WHERE journal_entry_id = ?
+           ORDER BY id`,
+          [journalEntryId]
+        );
+        console.log('\n🔍 VERIFICATION - What was actually inserted in database:');
+        insertedLines.forEach((line, idx) => {
+          console.log(`  Line ${idx + 1}: Account ${line.account_id}`);
+          console.log(`    Debit: ${parseFloat(line.debit_amount).toFixed(2)}`);
+          console.log(`    Credit: ${parseFloat(line.credit_amount).toFixed(2)}`);
+          console.log(`    Description: ${line.description}`);
+        });
+        console.log('========================================\n');
+        
+        // Update account_ledger for Purchase Tax Control Account (debit, increases tax control)
+        if (totalTaxAmount > 0) {
+          const [lastVatLedger] = await connection.query(
+            'SELECT running_balance FROM account_ledger WHERE account_id = ? ORDER BY date DESC, id DESC LIMIT 1',
+            [vatAccountId]
+          );
+          const prevVatBalance = lastVatLedger.length > 0 ? parseFloat(lastVatLedger[0].running_balance) : 0;
+          const newVatBalance = prevVatBalance + totalTaxAmount;
+          
+          await connection.query(
+            `INSERT INTO account_ledger (account_id, date, description, reference_type, reference_id, debit, credit, running_balance, status)
+             VALUES (?, CURDATE(), ?, ?, ?, ?, ?, ?, 'confirmed')`,
+            [
+              vatAccountId,
+              `Purchase Tax Control - PO ${po_number}`,
+              'purchase_order',
+              journalEntryId,
+              totalTaxAmount,
+              0,
+              newVatBalance
+            ]
+          );
+        }
+      }
+
+      await connection.commit();
+
+      res.json({ 
+        success: true, 
+        message: 'Items received successfully into store inventory',
+        data: {
+          total_ordered,
+          total_received,
+          status: total_received >= total_ordered ? 'received' : 'partially_received'
+        }
+      });
+    } catch (error) {
+      await connection.rollback();
+      console.error('Error receiving items:', error);
+      res.status(500).json({ success: false, error: 'Failed to receive items' });
+    } finally {
+      connection.release();
+    }
+  },
+
+  // Get purchase order with receipt history
+  getPurchaseOrderWithReceipts: async (req, res) => {
+    try {
+      const { id } = req.params;
+      
+      // Get purchase order details
+      const [purchaseOrders] = await db.query(`
+        SELECT 
+          po.*,
+          s.company_name as supplier_name,
+          s.supplier_code as supplier_code,
+          u.full_name as created_by_name
+        FROM purchase_orders po
+        LEFT JOIN suppliers s ON po.supplier_id = s.id
+        LEFT JOIN users u ON po.created_by = u.id
+        WHERE po.id = ?
+      `, [id]);
+      
+      if (purchaseOrders.length === 0) {
+        return res.status(404).json({ success: false, error: 'Purchase order not found' });
+      }
+
+      // Get purchase order items
+      const [items] = await db.query(`
+        SELECT 
+          poi.*,
+          COALESCE(p.product_name, rm.name) AS product_name,
+          p.product_code,
+          COALESCE(p.unit_of_measure, rm.unit) AS unit_of_measure
+        FROM purchase_order_items poi
+        LEFT JOIN products p ON poi.product_id = p.id
+        LEFT JOIN raw_materials rm ON poi.raw_material_id = rm.id
+        WHERE poi.purchase_order_id = ?
+      `, [id]);
+
+      // Get receipt history
+      const [receipts] = await db.query(`
+        SELECT 
+          ir.*,
+          p.product_name,
+          p.product_code,
+          s.store_name,
+          u.full_name as received_by_name
+        FROM inventory_receipts ir
+        LEFT JOIN products p ON ir.product_id = p.id
+        LEFT JOIN stores s ON ir.store_id = s.id
+        LEFT JOIN users u ON ir.received_by = u.id
+        WHERE ir.purchase_order_id = ?
+        ORDER BY ir.received_at DESC
+      `, [id]);
+
+      const purchaseOrder = purchaseOrders[0];
+      purchaseOrder.items = items;
+      purchaseOrder.receipts = receipts;
+      
+      res.json({ success: true, data: purchaseOrder });
+    } catch (error) {
+      console.error('Error fetching purchase order with receipts:', error);
+      res.status(500).json({ success: false, error: 'Failed to fetch purchase order' });
+    }
+  }
+};
+
+module.exports = purchaseOrderController; 

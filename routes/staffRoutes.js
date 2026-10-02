@@ -1,0 +1,122 @@
+const express = require('express');
+const router = express.Router();
+const staffController = require('../controllers/staffController');
+const attendanceController = require('../controllers/attendanceController');
+const departmentController = require('../controllers/departmentController');
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage() });
+const documentController = require('../controllers/documentController');
+const calendarTaskController = require('../controllers/calendarTaskController');
+const publicHolidaysController = require('../controllers/publicHolidaysController');
+const { authenticateToken } = require('../middleware/auth');
+//const upload = multer({ dest: 'http://www.citlogisticssystems.com/woosh/admin/upload/staff/' });
+
+// Apply authentication middleware to all staff routes
+router.use(authenticateToken);
+
+// Staff routes
+router.get('/staff', staffController.getAllStaff);
+router.get('/staff-by-role', staffController.getStaffByRole);
+router.get('/staff/:id', staffController.getStaffById);
+router.post('/staff', staffController.createStaff);
+router.put('/staff/:id', staffController.updateStaff);
+router.delete('/staff/:id', staffController.deleteStaff);
+router.patch('/staff/:id/status', staffController.updateStaffStatus);
+router.patch('/staff/:id/deactivate', staffController.deactivateStaff);
+
+// Employee document routes
+router.post('/staff/:id/documents', upload.single('file'), staffController.uploadDocument);
+router.get('/staff/:id/documents', staffController.getDocuments);
+router.delete('/staff/documents/:docId', staffController.deleteDocument);
+
+// Document upload route
+router.post('/documents', upload.single('file'), documentController.uploadDocument);
+
+// List documents
+router.get('/documents', documentController.getAllDocuments);
+
+// Delete document
+router.delete('/documents/:id', documentController.deleteDocument);
+
+// Document category management routes
+router.get('/document-categories', documentController.getAllCategories);
+router.post('/document-categories', documentController.createCategory);
+router.put('/document-categories/:id', documentController.updateCategory);
+router.delete('/document-categories/:id', documentController.deleteCategory);
+
+// Document folder management routes
+router.get('/document-folders', documentController.getAllFolders);
+router.get('/document-folders/:id', documentController.getFolderById);
+router.post('/document-folders', documentController.createFolder);
+router.put('/document-folders/:id', documentController.updateFolder);
+router.delete('/document-folders/:id', documentController.deleteFolder);
+router.post('/document-folders/migrate', documentController.runFolderMigration);
+
+// Employee contract routes
+router.post('/staff/:id/contracts', upload.single('file'), staffController.uploadContract);
+router.get('/staff/:id/contracts', staffController.getContracts);
+router.post('/staff/contracts/:contractId/renew', upload.single('file'), staffController.renewContract);
+router.get('/staff/contracts/expiring', staffController.getExpiringContracts);
+
+// Staff avatar upload
+router.post('/staff/:id/avatar', upload.single('avatar'), staffController.uploadAvatar);
+
+// Termination Letters
+router.post('/staff/:id/termination-letters', upload.single('file'), staffController.uploadTerminationLetter);
+router.get('/staff/:id/termination-letters', staffController.getTerminationLetters);
+
+// Warning Letters
+router.post('/staff/:id/warning-letters', upload.single('file'), staffController.uploadWarningLetter);
+router.get('/staff/:id/warning-letters', staffController.getWarningLetters);
+
+// Employee warning routes
+router.post('/staff/:id/warnings', staffController.postWarning);
+router.get('/staff/:id/warnings', staffController.getWarnings);
+router.delete('/staff/warnings/:warningId', staffController.deleteWarning);
+
+// HR Calendar Task routes
+router.get('/calendar-tasks', calendarTaskController.getTasks);
+router.post('/calendar-tasks', calendarTaskController.addTask);
+router.delete('/calendar-tasks/:id', calendarTaskController.deleteTask);
+
+// Public Holidays routes
+router.get('/public-holidays', publicHolidaysController.getAllHolidays);
+router.get('/public-holidays/month', publicHolidaysController.getHolidaysByMonth);
+router.post('/public-holidays', publicHolidaysController.addHoliday);
+router.put('/public-holidays/:id', publicHolidaysController.updateHoliday);
+router.delete('/public-holidays/:id', publicHolidaysController.deleteHoliday);
+
+// Department routes
+router.get('/departments', departmentController.getAllDepartments);
+router.post('/departments', departmentController.addDepartment);
+router.put('/departments/:id', departmentController.editDepartment);
+router.patch('/departments/:id/deactivate', departmentController.deactivateDepartment);
+
+// My Departments routes (new department system)
+router.get('/my-departments', staffController.getAllDepartments);
+
+// Attendance routes
+router.get('/attendance/today', attendanceController.getTodayAttendance);
+router.get('/attendance', attendanceController.getAllAttendance);
+router.get('/attendance/monthly-count', attendanceController.getMonthlyRecordCount);
+router.post('/attendance', attendanceController.createAttendance);
+router.post('/attendance/checkin', attendanceController.checkIn);
+router.post('/attendance/checkout', attendanceController.checkOut);
+router.put('/attendance/:id', attendanceController.updateAttendance);
+
+// GET /api/employee-working-hours
+router.get('/employee-working-hours', staffController.getEmployeeWorkingHours);
+// GET /api/employee-working-days
+router.get('/employee-working-days', staffController.getEmployeeWorkingDays);
+// GET /api/out-of-office-requests
+router.get('/out-of-office-requests', staffController.getOutOfOfficeRequests);
+// POST /api/out-of-office-requests
+router.post('/out-of-office-requests', staffController.createOutOfOfficeRequest);
+// PATCH /api/out-of-office-requests/:id (update status)
+router.patch('/out-of-office-requests/:id', staffController.updateOutOfOfficeRequestStatus);
+// PUT /api/out-of-office-requests/:id (update full request)
+router.put('/out-of-office-requests/:id', staffController.updateOutOfOfficeRequest);
+// DELETE /api/out-of-office-requests/:id
+router.delete('/out-of-office-requests/:id', staffController.deleteOutOfOfficeRequest);
+
+module.exports = router; 

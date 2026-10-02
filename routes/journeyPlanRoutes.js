@@ -1,0 +1,39 @@
+const express = require('express');
+const router = express.Router();
+const journeyPlanController = require('../controllers/journeyPlanController');
+const { authenticateToken } = require('../middleware/auth');
+
+// Apply authentication middleware to all journey plan routes
+router.use(authenticateToken);
+
+// Get all journey plans
+router.get('/', journeyPlanController.getAllJourneyPlans);
+
+// Get route compliance summary
+router.get('/compliance', journeyPlanController.getRouteCompliance);
+
+// Get outlet coverage with weekly breakdown
+router.get('/outlet-coverage', journeyPlanController.getOutletCoverage);
+
+// Get journey plans by user ID
+router.get('/user/:userId', journeyPlanController.getJourneyPlansByUser);
+
+// Get journey plan by ID
+router.get('/:id', journeyPlanController.getJourneyPlan);
+
+// Create new journey plan
+router.post('/', journeyPlanController.createJourneyPlan);
+
+// Update journey plan
+router.put('/:id', journeyPlanController.updateJourneyPlan);
+
+// Delete journey plan
+router.delete('/:id', journeyPlanController.deleteJourneyPlan);
+
+// Check in to journey plan
+router.post('/:id/checkin', journeyPlanController.checkIn);
+
+// Check out from journey plan
+router.post('/:id/checkout', journeyPlanController.checkOut);
+
+module.exports = router; 
