@@ -4,6 +4,43 @@ const fs = require('fs');
 // Uncomment if using cloudinary
 const cloudinary = require('../config/cloudinary');
 
+// Stores an uploaded file (multer memory buffer) and returns its URL.
+// Uses Cloudinary unless FILE_STORAGE_TYPE=local or the Cloudinary keys are missing.
+const storeUploadedFile = async (file) => {
+  const { originalname, buffer } = file;
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+  const apiKey = process.env.CLOUDINARY_API_KEY;
+  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  const fileStorageType = process.env.FILE_STORAGE_TYPE || 'cloudinary';
+
+  if (fileStorageType === 'local' || !cloudName || !apiKey || !apiSecret) {
+    const uploadsDir = path.join(__dirname, '../uploads/documents');
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+    const sanitizedName = originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
+    const filename = `doc_${Date.now()}_${sanitizedName}`;
+    fs.writeFileSync(path.join(uploadsDir, filename), buffer);
+    return `/uploads/documents/${filename}`;
+  }
+
+  const stream = require('stream');
+  const result = await new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        folder: 'documents',
+        resource_type: 'auto',
+        public_id: `${Date.now()}_${originalname}`.replace(/\s+/g, '_'),
+      },
+      (error, uploaded) => (error ? reject(error) : resolve(uploaded))
+    );
+    const bufferStream = new stream.PassThrough();
+    bufferStream.end(buffer);
+    bufferStream.pipe(uploadStream);
+  });
+  return result.secure_url;
+};
+
 const documentController = {
   uploadDocument: async (req, res) => {
     try {
@@ -17,79 +54,7 @@ const documentController = {
         return res.status(400).json({ message: 'Title, category, and file are required.' });
       }
       
-      const { originalname, buffer, mimetype } = req.file;
-      console.log('📤 Uploading document:', { title, category, originalname, mimetype, bufferSize: buffer.length });
-      
-      // Check if Cloudinary is properly configured
-      const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-      const apiKey = process.env.CLOUDINARY_API_KEY;
-      const apiSecret = process.env.CLOUDINARY_API_SECRET;
-      const fileStorageType = process.env.FILE_STORAGE_TYPE || 'cloudinary';
-      
-      console.log('🔧 Environment check:', {
-        cloudName: !!cloudName,
-        apiKey: !!apiKey,
-        apiSecret: !!apiSecret,
-        fileStorageType
-      });
-      
-      let fileUrl;
-      
-      if (fileStorageType === 'local' || !cloudName || !apiKey || !apiSecret) {
-        // Use local file storage
-        console.log('Using local file storage for document...');
-        
-        // Create uploads directory if it doesn't exist
-        const uploadsDir = path.join(__dirname, '../uploads/documents');
-        if (!fs.existsSync(uploadsDir)) {
-          fs.mkdirSync(uploadsDir, { recursive: true });
-        }
-        
-        // Generate unique filename
-        const timestamp = Date.now();
-        const sanitizedName = originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
-        const filename = `doc_${timestamp}_${sanitizedName}`;
-        const filePath = path.join(uploadsDir, filename);
-        
-        // Save file locally
-        fs.writeFileSync(filePath, buffer);
-        
-        // Create URL for local file
-        fileUrl = `/uploads/documents/${filename}`;
-        console.log('Local document saved:', filePath);
-      } else {
-        // Use Cloudinary with buffer
-        console.log('Using Cloudinary upload for document...');
-        const stream = require('stream');
-        
-        // Create a promise to handle the async upload
-        const uploadPromise = new Promise((resolve, reject) => {
-          const uploadStream = cloudinary.uploader.upload_stream(
-            {
-              folder: 'documents',
-              resource_type: 'auto',
-              public_id: `${Date.now()}_${originalname}`.replace(/\s+/g, '_'),
-            },
-            (error, result) => {
-              if (error) {
-                console.error('❌ Cloudinary upload error:', error);
-                reject(error);
-              } else {
-                console.log('✅ File uploaded successfully:', result.secure_url);
-                fileUrl = result.secure_url;
-                resolve(result);
-              }
-            }
-          );
-
-          const bufferStream = new stream.PassThrough();
-          bufferStream.end(buffer);
-          bufferStream.pipe(uploadStream);
-        });
-
-        // Wait for upload to complete
-        await uploadPromise;
-      }
+      const fileUrl = await storeUploadedFile(req.file);
       
       // Save metadata to DB
       console.log('💾 Saving to database:', { title, category, fileUrl, description, start_date, end_date });
@@ -133,6 +98,60 @@ const documentController = {
       res.json(rows);
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch documents', error: error.message });
+    }
+  },
+
+  // Edit a document's details; sending a new file replaces the stored file
+  updateDocument: async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { title, category, description, start_date, end_date, parent_folder_id } = req.body;
+
+      const [existing] = await db.query('SELECT id FROM documents WHERE id = ?', [id]);
+      if (existing.length === 0) {
+        return res.status(404).json({ message: 'Document not found' });
+      }
+      if (!title || !String(title).trim() || !category) {
+        return res.status(400).json({ message: 'Title and category are required.' });
+      }
+
+      const blankToNull = (v) => (v === undefined || v === null || String(v).trim() === '' || v === 'null' ? null : v);
+      const folderId = blankToNull(parent_folder_id) === null ? null : parseInt(parent_folder_id, 10);
+      if (folderId !== null) {
+        if (Number.isNaN(folderId)) {
+          return res.status(400).json({ message: 'Invalid folder' });
+        }
+        const [folder] = await db.query('SELECT id FROM document_folders WHERE id = ?', [folderId]);
+        if (folder.length === 0) {
+          return res.status(404).json({ message: 'Folder not found' });
+        }
+      }
+
+      const fields = [
+        'title = ?', 'category = ?', 'description = ?', 'start_date = ?', 'end_date = ?', 'parent_folder_id = ?',
+      ];
+      const values = [
+        String(title).trim(), category, blankToNull(description), blankToNull(start_date), blankToNull(end_date), folderId,
+      ];
+
+      let fileUrl;
+      if (req.file) {
+        fileUrl = await storeUploadedFile(req.file);
+        fields.push('file_url = ?');
+        values.push(fileUrl);
+      }
+
+      values.push(id);
+      await db.query(`UPDATE documents SET ${fields.join(', ')} WHERE id = ?`, values);
+
+      const [rows] = await db.query(
+        'SELECT id, title, category, file_url, description, start_date, end_date, parent_folder_id, uploaded_at FROM documents WHERE id = ?',
+        [id]
+      );
+      res.json({ message: 'Document updated successfully', document: rows[0] });
+    } catch (error) {
+      console.error('Document update error:', error);
+      res.status(500).json({ message: 'Failed to update document', error: error.message });
     }
   },
 

@@ -391,12 +391,20 @@ const receivablesController = {
   // List receipts, optionally filtered by status
   listReceipts: async (req, res) => {
     try {
-      const { status } = req.query;
+      const { status, invoice_id } = req.query;
              let query = `SELECT r.*, c.name as client_name, coa.account_name FROM receipts r LEFT JOIN Clients c ON r.client_id = c.id LEFT JOIN chart_of_accounts coa ON r.account_id = coa.id`;
       const params = [];
+      const conditions = [];
       if (status) {
-        query += ' WHERE r.status = ?';
+        conditions.push('r.status = ?');
         params.push(status);
+      }
+      if (invoice_id) {
+        conditions.push('r.invoice_number = ?');
+        params.push(invoice_id);
+      }
+      if (conditions.length) {
+        query += ' WHERE ' + conditions.join(' AND ');
       }
       query += ' ORDER BY r.receipt_date DESC, r.id DESC';
       const [rows] = await db.query(query, params);

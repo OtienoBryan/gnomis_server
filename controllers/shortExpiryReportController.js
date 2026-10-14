@@ -16,7 +16,8 @@ exports.getAllShortExpiryReports = async (req, res) => {
              oc.name AS outletTypeName,
              oa.name AS outletAccountName,
              sr.name AS salesRepName,
-             s.sku AS productSku
+             s.sku AS productSku,
+             p.selling_price AS unitPrice
       FROM short_expiry se
       LEFT JOIN Clients c ON se.outlet_id = c.id
       LEFT JOIN Regions r ON c.region_id = r.id
@@ -27,7 +28,8 @@ exports.getAllShortExpiryReports = async (req, res) => {
       LEFT JOIN skus s ON p.sku_id = s.id
     `;
     let countSql = `
-      SELECT COUNT(*) as total
+      SELECT COUNT(*) as total,
+             COALESCE(SUM(se.quantity * COALESCE(p.selling_price, 0)), 0) AS totalValue
       FROM short_expiry se
       LEFT JOIN Clients c ON se.outlet_id = c.id
       LEFT JOIN Regions r ON c.region_id = r.id
@@ -131,12 +133,14 @@ exports.getAllShortExpiryReports = async (req, res) => {
     const [results] = await db.query(sql, params);
     const [countResult] = await db.query(countSql, countParams);
     const total = countResult[0].total;
+    const totalValue = Number(countResult[0].totalValue) || 0;
     
     console.log(`Query returned ${results.length} reports out of ${total} total`);
     
     res.json({ 
       success: true, 
       data: results,
+      summary: { totalValue },
       pagination: {
         page: isViewAll ? 1 : parseInt(page),
         limit: isViewAll ? total : parseInt(limit),
@@ -164,7 +168,8 @@ exports.exportShortExpiryReportsCSV = async (req, res) => {
              oc.name AS outletTypeName,
              oa.name AS outletAccountName,
              sr.name AS salesRepName,
-             s.sku AS productSku
+             s.sku AS productSku,
+             p.selling_price AS unitPrice
       FROM short_expiry se
       LEFT JOIN Clients c ON se.outlet_id = c.id
       LEFT JOIN Regions r ON c.region_id = r.id
@@ -250,7 +255,7 @@ exports.exportShortExpiryReportsCSV = async (req, res) => {
     const [results] = await db.query(sql, params);
     
     // Convert to CSV
-    const headers = ['ID', 'Product ID', 'Product Name', 'Quantity', 'Batch Number', 'Expiry Date', 'Created At', 'Outlet', 'Region', 'Outlet Type', 'Outlet Account', 'Sales Rep'];
+    const headers = ['ID', 'Product ID', 'Product Name', 'Quantity', 'Unit Price', 'Batch Number', 'Expiry Date', 'Created At', 'Outlet', 'Region', 'Outlet Type', 'Outlet Account', 'Sales Rep'];
     const csvRows = [headers.join(',')];
     
     results.forEach(row => {
@@ -259,6 +264,7 @@ exports.exportShortExpiryReportsCSV = async (req, res) => {
         row.productId || '',
         `"${(row.product_name || '').replace(/"/g, '""')}"`,
         row.quantity || '',
+        row.unitPrice != null ? Number(row.unitPrice).toFixed(2) : '',
         `"${(row.batch_number || '').replace(/"/g, '""')}"`,
         `"${(row.expiry_date || '').replace(/"/g, '""')}"`,
         row.createdAt ? new Date(row.createdAt).toISOString() : '',

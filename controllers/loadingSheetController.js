@@ -212,7 +212,7 @@ const loadingSheetController = {
           [loadingSheetId, orderId]
         );
         await connection.query(
-          "UPDATE sales_orders SET driver_id = ?, vehicle_id = ?, assigned_at = ?, status = 'assigned' WHERE id = ?",
+          "UPDATE sales_orders SET driver_id = ?, vehicle_id = ?, assigned_at = ?, status = 'assigned', my_status = 2 WHERE id = ?",
           [driver_id, vehicle_id, assignedAt, orderId]
         );
         await recordOrderAssigned(connection, orderId, req.user?.id, driver_id, vehicle_id);

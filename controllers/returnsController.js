@@ -63,7 +63,8 @@ const returnsController = {
           c.contact as client_contact,
           reg.name as region_name,
           oa.name as outlet_account_name,
-          sr.name as salesrep_name
+          sr.name as salesrep_name,
+          r.photo_url
         FROM returns r
         LEFT JOIN Clients c ON r.client_id = c.id
         LEFT JOIN Regions reg ON c.region_id = reg.id
@@ -103,7 +104,8 @@ const returnsController = {
           c.contact as client_contact,
           reg.name as region_name,
           oa.name as outlet_account_name,
-          sr.name as salesrep_name
+          sr.name as salesrep_name,
+          r.photo_url
         FROM returns r
         LEFT JOIN Clients c ON r.client_id = c.id
         LEFT JOIN Regions reg ON c.region_id = reg.id

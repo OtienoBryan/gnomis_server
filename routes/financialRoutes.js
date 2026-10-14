@@ -223,6 +223,7 @@ router.post('/sales-orders', authenticateToken, (req, res, next) => {
 // Specific sales order routes (must come before general :id routes)
 router.get('/sales-orders/:id/items', authenticateToken, salesOrderController.getSalesOrderItems);
 router.post('/sales-orders/:id/receive-back', authenticateToken, salesOrderController.receiveBackToStock);
+router.post('/sales-orders/:id/send-invoice', authenticateToken, salesOrderController.sendInvoiceEmail);
 router.post('/sales-orders/:id/convert-to-invoice', authenticateToken, salesOrderController.convertToInvoice);
 router.post('/sales-orders/:id/complete-delivery', authenticateToken, async (req, res) => {
   console.log('Complete delivery route hit:', req.params, req.body);
@@ -474,5 +475,14 @@ router.get('/non-supplies', authenticateToken, nonSuppliesController.getAllNonSu
 router.get('/non-supplies/:id', authenticateToken, nonSuppliesController.getNonSupplyById);
 router.get('/non-supplies/:id/items', authenticateToken, nonSuppliesController.getNonSupplyItems);
 router.get('/non-supplies/items/summary', authenticateToken, nonSuppliesController.getNonSupplyItemsSummary);
+
+// Petty cash allocation to sales reps
+const pettyCashController = require('../controllers/pettyCashController');
+const { requireRole } = require('../middleware/auth');
+const pettyCashRoles = requireRole(['admin', 'manager', 'accountant', 'executive', 'sales', 'finance']);
+router.get('/petty-cash/sales-reps', authenticateToken, pettyCashRoles, pettyCashController.listSalesReps);
+router.get('/petty-cash/sales-reps/:id', authenticateToken, pettyCashRoles, pettyCashController.getStaffDetails);
+router.get('/petty-cash/allocations', authenticateToken, pettyCashRoles, pettyCashController.listAllocations);
+router.post('/petty-cash/allocations', authenticateToken, pettyCashRoles, pettyCashController.allocate);
 
 module.exports = router; 

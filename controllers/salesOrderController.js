@@ -1,4 +1,5 @@
 const db = require('../database/db');
+const { sendInvoiceEmail } = require('../services/emailService');
 const {
   recordOrderCreated,
   recordOrderApproved,
@@ -7,6 +8,49 @@ const {
 } = require('../utils/orderDetailsTracker');
 
 const salesOrderController = {
+  // Email the invoice for a sales order to the client via Resend
+  sendInvoiceEmail: async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { to, cc, subject, message } = req.body || {};
+      const [orders] = await db.query(
+        `SELECT so.*, c.name, c.email FROM sales_orders so LEFT JOIN Clients c ON so.client_id = c.id WHERE so.id = ?`,
+        [id]
+      );
+      if (orders.length === 0) {
+        return res.status(404).json({ success: false, error: 'Sales order not found' });
+      }
+      const order = orders[0];
+      const recipient = String(to || order.email || '').trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) {
+        return res.status(400).json({ success: false, error: 'A valid recipient email address is required' });
+      }
+      // CC accepts an array or a comma/semicolon separated string; every address must be valid
+      const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      const ccList = [...new Set(
+        (Array.isArray(cc) ? cc : String(cc || '').split(/[,;]/))
+          .map((a) => String(a).trim())
+          .filter(Boolean)
+      )];
+      const badCc = ccList.find((a) => !emailRe.test(a));
+      if (badCc) {
+        return res.status(400).json({ success: false, error: `Invalid CC email address: ${badCc}` });
+      }
+      const [items] = await db.query(
+        `SELECT soi.*, p.product_name FROM sales_order_items soi LEFT JOIN products p ON soi.product_id = p.id WHERE soi.sales_order_id = ?`,
+        [id]
+      );
+      order.items = items;
+      const year = order.order_date ? new Date(order.order_date).getFullYear() : new Date().getFullYear();
+      const invoiceNumber = `INV/${year}/${String(order.id).padStart(5, '0')}`;
+      await sendInvoiceEmail({ to: recipient, cc: ccList, subject, message, order, invoiceNumber });
+      res.json({ success: true, message: `Invoice sent to ${recipient}` });
+    } catch (error) {
+      console.error('Error sending invoice email:', error);
+      res.status(500).json({ success: false, error: error.message || 'Failed to send invoice email' });
+    }
+  },
+
   // Get all sales orders
   getAllSalesOrders: async (req, res) => {
     try {
@@ -472,7 +516,26 @@ const salesOrderController = {
       await connection.beginTransaction();
       const { id } = req.params;
       const { customer_id, client_id, sales_rep_id, order_date, expected_delivery_date, notes, status, items } = req.body;
-      
+      // LPO prices are VAT-inclusive: when set, 16% items have VAT extracted from the unit price
+      // instead of added on top (total = quantity x unit price)
+      const pricesIncludeVat = req.body.prices_include_vat === true;
+
+      // Per-line amounts. Inclusive: gross = qty x price, net = gross / 1.16, vat = gross - net, and the
+      // stored unit price is the net per unit. Exclusive: net = qty x price, vat = net x rate.
+      const computeLine = (item, inclusive) => {
+        const qty = Number(item.quantity);
+        const price = Number(item.unit_price);
+        const is16 = item.tax_type === '16%'; // zero_rated/exempted => no VAT
+        if (inclusive && is16) {
+          const total = +(qty * price).toFixed(2);
+          const net = +(total / 1.16).toFixed(2);
+          return { net, tax: +(total - net).toFixed(2), total, unitPrice: qty ? +(net / qty).toFixed(2) : price };
+        }
+        const net = qty * price;
+        const tax = +(net * (is16 ? 0.16 : 0)).toFixed(2);
+        return { net, tax, total: +(net + tax).toFixed(2), unitPrice: price };
+      };
+
       // Get the current user ID from the request
       const currentUserId = req.user?.id || 1; // Default to user ID 1 if not available
       
@@ -508,6 +571,14 @@ const salesOrderController = {
         subtotal = +subtotal.toFixed(2);
         taxAmount = +taxAmount.toFixed(2);
         totalAmount = +totalAmount.toFixed(2);
+        // A VAT-inclusive confirmation stores a rounded net unit price, so recomputing from it can drift by
+        // a few cents; keep the stored totals when the difference is only rounding.
+        const storedTotal = Number(existingSO[0].total_amount);
+        if (Number.isFinite(storedTotal) && Math.abs(totalAmount - storedTotal) <= 0.01 * dbItems.length) {
+          subtotal = Number(existingSO[0].subtotal);
+          taxAmount = Number(existingSO[0].tax_amount);
+          totalAmount = storedTotal;
+        }
       } else {
         // If only changing status to cancelled/declined without items, preserve existing totals
         const statusMapPreview = {
@@ -546,15 +617,13 @@ const salesOrderController = {
           }
         }
 
-        // Calculate totals as tax-exclusive using per-item tax_type
+        // Calculate totals using per-item tax_type: tax-exclusive by default, or VAT-inclusive when
+        // confirming an order whose (LPO) prices already include VAT
         for (const item of items) {
-          const net = Number(item.quantity) * Number(item.unit_price);
-          const rate = (item.tax_type === '16%') ? 0.16 : 0; // zero_rated/exempted => 0
-          const itemTaxAmount = +(net * rate).toFixed(2);
-          const itemTotal = +(net + itemTaxAmount).toFixed(2);
-          subtotal += net;
-          taxAmount += itemTaxAmount;
-          totalAmount += itemTotal;
+          const line = computeLine(item, pricesIncludeVat);
+          subtotal += line.net;
+          taxAmount += line.tax;
+          totalAmount += line.total;
         }
         subtotal = +subtotal.toFixed(2);
         taxAmount = +taxAmount.toFixed(2);
@@ -624,15 +693,13 @@ const salesOrderController = {
         // Delete and recreate items only if not approved/locked
         await connection.query('DELETE FROM sales_order_items WHERE sales_order_id = ?', [id]);
         for (const item of items) {
-          const net = Number(item.quantity) * Number(item.unit_price);
-          const rate = (item.tax_type === '16%') ? 0.16 : 0;
-          const itemTax = +(net * rate).toFixed(2);
-          const totalPrice = +(net + itemTax).toFixed(2);
+          const line = computeLine(item, pricesIncludeVat);
+          // unit_price is always stored tax-exclusive (the invoice pages assume that)
           await connection.query(`
             INSERT INTO sales_order_items (
               sales_order_id, product_id, quantity, unit_price, tax_amount, total_price, tax_type, net_price
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-          `, [id, item.product_id, item.quantity, item.unit_price, itemTax, totalPrice, item.tax_type || '16%', net]);
+          `, [id, item.product_id, item.quantity, line.unitPrice, line.tax, line.total, item.tax_type || '16%', line.net]);
         }
         }
       }

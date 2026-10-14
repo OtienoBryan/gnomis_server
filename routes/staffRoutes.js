@@ -37,6 +37,7 @@ router.get('/documents', documentController.getAllDocuments);
 
 // Delete document
 router.delete('/documents/:id', documentController.deleteDocument);
+router.put('/documents/:id', upload.single('file'), documentController.updateDocument);
 
 // Document category management routes
 router.get('/document-categories', documentController.getAllCategories);

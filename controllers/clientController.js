@@ -311,15 +311,33 @@ const clientController = {
       if (outlet_account !== undefined) { updates.push('outlet_account = ?'); values.push(outlet_account); }
       
       // Check if location is locked before allowing latitude/longitude updates
-      if (latitude !== undefined || longitude !== undefined) {
-        const [clientCheck] = await db.query('SELECT location_locked FROM Clients WHERE id = ?', [id]);
-        if (clientCheck.length > 0 && clientCheck[0].location_locked === 1) {
-          return res.status(403).json({ message: 'Location is locked. Unlock location to make changes.' });
+      // Clients are edited with the whole record (including unchanged coordinates), so only a real
+      // change to latitude/longitude counts as a location edit.
+      let writeLatitude = latitude !== undefined;
+      let writeLongitude = longitude !== undefined;
+      if (writeLatitude || writeLongitude) {
+        const [clientCheck] = await db.query(
+          'SELECT location_locked, latitude, longitude FROM Clients WHERE id = ?',
+          [id]
+        );
+        if (clientCheck.length > 0) {
+          const current = clientCheck[0];
+          const changed = (incoming, stored) => {
+            const a = incoming === null || incoming === '' ? null : Number(incoming);
+            const b = stored === null || stored === undefined ? null : Number(stored);
+            if (a === null || b === null) return a !== b;
+            return Math.abs(a - b) > 1e-9;
+          };
+          writeLatitude = writeLatitude && changed(latitude, current.latitude);
+          writeLongitude = writeLongitude && changed(longitude, current.longitude);
+          if (current.location_locked === 1 && (writeLatitude || writeLongitude)) {
+            return res.status(403).json({ message: 'Location is locked. Unlock location to make changes.' });
+          }
         }
       }
-      
-      if (latitude !== undefined) { updates.push('latitude = ?'); values.push(latitude); }
-      if (longitude !== undefined) { updates.push('longitude = ?'); values.push(longitude); }
+
+      if (writeLatitude) { updates.push('latitude = ?'); values.push(latitude); }
+      if (writeLongitude) { updates.push('longitude = ?'); values.push(longitude); }
       if (location_locked !== undefined) { updates.push('location_locked = ?'); values.push(location_locked ? 1 : 0); }
       
       if (updates.length === 0) {
@@ -471,12 +489,14 @@ const clientController = {
       const { id } = req.params;
       console.log(`[getClientInvoices] called for client_id: ${id}`);
       const [rows] = await db.query(
-        `SELECT so.*, COALESCE(r.amount_paid, 0) AS amount_paid
+        `SELECT so.*, COALESCE(r.amount_paid, 0) AS amount_paid, COALESCE(r.amount_pending, 0) AS amount_pending
          FROM sales_orders so
          LEFT JOIN (
-           SELECT invoice_number, SUM(amount) AS amount_paid
+           SELECT invoice_number,
+                  SUM(CASE WHEN status = 'confirmed' THEN amount ELSE 0 END) AS amount_paid,
+                  SUM(CASE WHEN status = 'in pay' THEN amount ELSE 0 END) AS amount_pending
            FROM receipts
-           WHERE status = 'confirmed'
+           WHERE status IN ('confirmed', 'in pay')
            GROUP BY invoice_number
          ) r ON r.invoice_number = so.id
          WHERE so.client_id = ?
