@@ -1536,7 +1536,7 @@ const storeController = {
         });
       }
 
-      if (orderResult[0].my_status !== 4 && orderResult[0].my_status !== 6) { // 4 = Cancelled, 6 = Returned to stock
+      if (orderResult[0].my_status !== 5 && orderResult[0].my_status !== 6) { // 5 = Cancelled, 6 = Returned to stock
         return res.status(400).json({
           success: false,
           error: 'Only cancelled orders or orders with returned products can have products returned to stock'

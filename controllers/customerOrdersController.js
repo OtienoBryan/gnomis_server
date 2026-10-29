@@ -46,20 +46,16 @@ const getCustomerOrdersData = async (req, res) => {
     // Handle status filter - explicitly check for '0' as it's a valid status
     if (status !== undefined && status !== null && status !== 'all' && status !== '') {
       if (status === 'assigned') {
-        // Assigned to a driver (via a loading sheet): status = 'assigned' and my_status = 2
-        whereConditions.push("so.my_status = 2 AND so.status = 'assigned'");
+        // Assigned is my_status = 2
+        whereConditions.push('so.my_status = 2');
       } else {
         const statusNum = parseInt(status);
         if (isNaN(statusNum)) {
           throw new Error(`Invalid status value: ${status}`);
         }
-        if (statusNum === 2) {
-          // In Transit shares my_status 2 with assigned orders, so leave those to the Assigned tab
-          whereConditions.push("so.my_status = 2 AND (so.status IS NULL OR so.status <> 'assigned')");
-        } else {
-          whereConditions.push('so.my_status = ?');
-          queryParams.push(statusNum);
-        }
+        // In Transit is my_status = 3 and Complete is my_status = 4; every number maps straight to my_status
+        whereConditions.push('so.my_status = ?');
+        queryParams.push(statusNum);
       }
     }
 
@@ -215,6 +211,13 @@ const getCustomerOrdersData = async (req, res) => {
         so.assigned_at,
         so.returned_at,
         so.received_by_name,
+        so.delivery_notes,
+        so.delivery_image,
+        so.delivery_note_url,
+        so.delivery_recipient_name,
+        so.delivery_recipient_id_number,
+        so.delivered_at,
+        so.cancellation_comment,
         so.created_by,
         c.name as customer_name,
         c.contact as customer_contact,
@@ -337,7 +340,7 @@ const getCustomerOrdersData = async (req, res) => {
         if (sc && sc.my_status != null) {
           // Rows are split by is_assigned: my_status 2 is "Assigned" when status = 'assigned',
           // otherwise "In Transit". Other statuses just add up.
-          const key = (Number(sc.my_status) === 2 && Number(sc.is_assigned) === 1) ? 'assigned' : sc.my_status;
+          const key = Number(sc.my_status) === 2 ? 'assigned' : sc.my_status;
           formattedStatusCounts[key] = (formattedStatusCounts[key] || 0) + (Number(sc.count) || 0);
         }
       });

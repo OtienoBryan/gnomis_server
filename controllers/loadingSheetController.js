@@ -8,7 +8,7 @@ const TERMINAL_STATUSES = ['delivered', 'cancelled'];
 const ORDER_STATUS_MAP = {
   in_transit: { status: 'shipped', my_status: 2 },
   delivered: { status: 'delivered', my_status: 3 },
-  cancelled: { status: 'cancelled', my_status: 4 }
+  cancelled: { status: 'cancelled', my_status: 5 }
 };
 
 // If every order on a sheet has reached a final status (delivered/cancelled/declined), auto-close the sheet
@@ -305,7 +305,7 @@ const loadingSheetController = {
             orderIds
           );
           await connection.query(
-            `UPDATE sales_orders SET status = 'cancelled', my_status = 4, cancel_reason = COALESCE(?, cancel_reason), updated_at = NOW() WHERE id IN (${placeholders}) AND my_status NOT IN (3)`,
+            `UPDATE sales_orders SET status = 'cancelled', my_status = 5, cancel_reason = COALESCE(?, cancel_reason), updated_at = NOW() WHERE id IN (${placeholders}) AND my_status NOT IN (3)`,
             [reason || null, ...orderIds]
           );
           for (const o of eligible) {

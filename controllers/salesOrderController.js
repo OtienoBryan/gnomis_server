@@ -102,20 +102,30 @@ const salesOrderController = {
         console.log('Sample order:', rows[0]);
         console.log('Sample order my_status:', rows[0].my_status);
       }
-      
-      // Get items for each sales order
-      for (let order of rows) {
-        const [items] = await db.query(`
-          SELECT 
-            soi.*, 
-            p.product_name, 
-            p.product_code, 
+
+      // Fetch all items in one query instead of one query per order.
+      // Callers that only need order totals can pass include_items=false.
+      const itemsByOrder = new Map();
+      if (req.query.include_items !== 'false' && rows.length > 0) {
+        const [allItems] = await db.query(`
+          SELECT
+            soi.*,
+            p.product_name,
+            p.product_code,
             p.unit_of_measure
           FROM sales_order_items soi
           LEFT JOIN products p ON soi.product_id = p.id
-          WHERE soi.sales_order_id = ?
-        `, [order.id]);
-        
+          WHERE soi.sales_order_id IN (?)
+        `, [rows.map(o => o.id)]);
+        for (const item of allItems) {
+          if (!itemsByOrder.has(item.sales_order_id)) itemsByOrder.set(item.sales_order_id, []);
+          itemsByOrder.get(item.sales_order_id).push(item);
+        }
+      }
+
+      for (let order of rows) {
+        const items = itemsByOrder.get(order.id) || [];
+
         // Map product fields into a product object for each item
         order.items = items.map(item => ({
           id: item.id,
@@ -638,8 +648,7 @@ const salesOrderController = {
         '2': 'shipped',
         '3': 'delivered',
         // numeric shortcuts that map directly to final strings (as per user's change)
-        '4': 'cancelled',
-        '5': 'declined',
+        '5': 'cancelled',
         // string inputs from UI
         'cancel': 'cancelled',
         'cancelled': 'cancelled',
@@ -655,11 +664,8 @@ const salesOrderController = {
       if (statusString === 'confirmed' && existingSO[0].status !== 'confirmed') {
         myStatus = 1; // approved on confirmation
       }
-      if (statusString === 'cancelled') {
-        myStatus = 4;
-      }
-      if (statusString === 'declined') {
-        myStatus = 5;
+      if (statusString === 'cancelled' || statusString === 'declined') {
+        myStatus = 5; // Cancelled
       }
       
       // Update sales order - preserve existing values if not provided
@@ -1118,7 +1124,7 @@ const salesOrderController = {
         return res.status(404).json({ success: false, error: 'Sales order not found' });
       }
       const order = orders[0];
-      if (order.my_status !== 4) {
+      if (order.my_status !== 5) {
         return res.status(400).json({ success: false, error: 'Order is not cancelled' });
       }
       // Get all items in the order

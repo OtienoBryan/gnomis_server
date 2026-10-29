@@ -422,7 +422,51 @@ const getUsage = async (req, res) => {
   }
 };
 
-module.exports = { listRequests, getRequest, createRequest, approveRequest, declineRequest, completeRequest, getUsage };
+// Products actually produced: one row per product per completed request.
+// Filtered by the date production was confirmed (start_date / end_date, inclusive).
+const getProduced = async (req, res) => {
+  try {
+    const { start_date, end_date } = req.query;
+    const where = ["r.status = 'completed'", 'rp.produced_quantity IS NOT NULL'];
+    const params = [];
+    if (start_date) { where.push('DATE(r.completed_at) >= ?'); params.push(start_date); }
+    if (end_date) { where.push('DATE(r.completed_at) <= ?'); params.push(end_date); }
+
+    const [rows] = await db.query(
+      `SELECT rp.product_id, p.product_name, p.product_code, p.category,
+              rp.quantity AS target_quantity, rp.produced_quantity,
+              r.id AS request_id, r.request_number, r.completed_at, st.store_name
+       FROM raw_material_request_products rp
+       JOIN raw_material_requests r ON r.id = rp.request_id
+       JOIN products p ON p.id = rp.product_id
+       LEFT JOIN stores st ON st.id = r.store_id
+       WHERE ${where.join(' AND ')}
+       ORDER BY r.completed_at DESC, r.id DESC, p.product_name ASC`,
+      params
+    );
+    // Recipes (raw material per unit) let the client work out materials used per product
+    let recipes = [];
+    const productIds = [...new Set(rows.map(r => r.product_id))];
+    if (productIds.length > 0) {
+      try {
+        [recipes] = await db.query(
+          `SELECT pr.product_id, pr.raw_material_id, pr.quantity, rm.name, rm.unit
+           FROM product_recipes pr
+           JOIN raw_materials rm ON rm.id = pr.raw_material_id
+           WHERE pr.product_id IN (?)
+           ORDER BY rm.name ASC`,
+          [productIds]
+        );
+      } catch (e) { /* recipes table not created yet */ }
+    }
+    res.json({ success: true, data: rows, recipes });
+  } catch (error) {
+    console.error('Error fetching produced products:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch produced products' });
+  }
+};
+
+module.exports = { listRequests, getRequest, createRequest, approveRequest, declineRequest, completeRequest, getUsage, getProduced };
 
 
 

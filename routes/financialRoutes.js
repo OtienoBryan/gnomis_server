@@ -19,7 +19,8 @@ const {
   approveRequest: approveRawMaterialRequest,
   declineRequest: declineRawMaterialRequest,
   completeRequest: completeRawMaterialRequest,
-  getUsage: getRawMaterialUsage
+  getUsage: getRawMaterialUsage,
+  getProduced: getProducedProducts
 } = require('../controllers/rawMaterialRequestController');
 const {
   listRawMaterials,
@@ -163,6 +164,7 @@ router.get('/payment-collections', authenticateToken, listPaymentCollections);
 router.patch('/payment-collections/:id/status', authenticateToken, updatePaymentCollectionStatus);
 router.get('/raw-material-requests', authenticateToken, listRawMaterialRequests);
 router.get('/raw-material-requests/usage', authenticateToken, getRawMaterialUsage);
+router.get('/raw-material-requests/produced', authenticateToken, getProducedProducts);
 router.get('/raw-material-requests/:id', authenticateToken, getRawMaterialRequest);
 router.post('/raw-material-requests', authenticateToken, createRawMaterialRequest);
 router.post('/raw-material-requests/:id/approve', authenticateToken, approveRawMaterialRequest);
@@ -243,7 +245,7 @@ router.post('/sales-orders/:id/complete-delivery', authenticateToken, async (req
     // Update sales order status to delivered
     const updateResult = await db.query(`
       UPDATE sales_orders 
-      SET my_status = 3, 
+      SET my_status = 4, 
           status = 'delivered',
           delivery_notes = ?,
           delivery_image = ?,
