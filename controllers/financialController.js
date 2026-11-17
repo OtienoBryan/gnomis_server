@@ -25,6 +25,17 @@ const chartOfAccountsController = {
     }
   },
 
+  // Get account categories (used as the parent of an account)
+  getAccountCategories: async (req, res) => {
+    try {
+      const [rows] = await db.query('SELECT id, name FROM account_category ORDER BY name');
+      res.json({ success: true, data: rows });
+    } catch (error) {
+      console.error('Error fetching account categories:', error);
+      res.status(500).json({ success: false, error: 'Failed to fetch account categories' });
+    }
+  },
+
   // Get accounts by type
   getAccountsByType: async (req, res) => {
     try {
@@ -207,18 +218,28 @@ const chartOfAccountsController = {
   createAccount: async (req, res) => {
     try {
       const { account_code, account_name, account_type, parent_account_id, description } = req.body;
-      
+      const code = account_code ? String(account_code).trim() : '';
+      const name = account_name ? String(account_name).trim() : '';
+      const type = Number(account_type);
+
+      if (!code || !name || !type) {
+        return res.status(400).json({ success: false, error: 'Account code, name and type are required' });
+      }
+
       const [result] = await db.query(`
         INSERT INTO chart_of_accounts (account_code, account_name, account_type, parent_account_id, description)
         VALUES (?, ?, ?, ?, ?)
-      `, [account_code, account_name, account_type, parent_account_id, description]);
-      
-      res.status(201).json({ 
-        success: true, 
-        data: { id: result.insertId, account_code, account_name, account_type },
-        message: 'Account created successfully' 
+      `, [code, name, type, parent_account_id || null, description || null]);
+
+      res.status(201).json({
+        success: true,
+        data: { id: result.insertId, account_code: code, account_name: name, account_type: type },
+        message: 'Account created successfully'
       });
     } catch (error) {
+      if (error.code === 'ER_DUP_ENTRY') {
+        return res.status(400).json({ success: false, error: 'An account with this code already exists' });
+      }
       console.error('Error creating account:', error);
       res.status(500).json({ success: false, error: 'Failed to create account' });
     }

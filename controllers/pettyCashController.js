@@ -67,13 +67,23 @@ const pettyCashController = {
     try {
       await ensureSchema(db);
       const [rows] = await db.query(
-        `SELECT sr.id, sr.name, sr.status, sr.balance,
+        `SELECT sr.*,
                 (SELECT MAX(a.allocation_date) FROM petty_cash_allocations a WHERE a.sales_rep_id = sr.id) AS last_allocation_date,
                 (SELECT COALESCE(SUM(a.amount), 0) FROM petty_cash_allocations a WHERE a.sales_rep_id = sr.id) AS total_allocated
          FROM SalesRep sr
          ORDER BY sr.name ASC`
       );
-      res.json({ success: true, data: rows });
+      // Whitelist fields (SELECT * is used so a missing optional column like `role` can't break the query)
+      const data = rows.map(r => ({
+        id: r.id,
+        name: r.name,
+        status: r.status,
+        balance: r.balance,
+        role: r.role || null,
+        last_allocation_date: r.last_allocation_date,
+        total_allocated: r.total_allocated,
+      }));
+      res.json({ success: true, data });
     } catch (error) {
       console.error('Error listing sales reps for petty cash:', error);
       res.status(500).json({ success: false, error: 'Failed to fetch sales reps' });

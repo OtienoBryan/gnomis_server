@@ -289,7 +289,8 @@ const salesOrderController = {
           soi.*, 
           p.product_name, 
           p.product_code, 
-          p.unit_of_measure
+          p.unit_of_measure,
+          p.outer_qty
         FROM sales_order_items soi
         LEFT JOIN products p ON soi.product_id = p.id
         WHERE soi.sales_order_id = ?
