@@ -131,6 +131,72 @@ const createTables = async () => {
   `);
 
   await db.query(`
+    CREATE TABLE IF NOT EXISTS sales_rep_deductions (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      sales_rep_id INT NOT NULL,
+      reference VARCHAR(100) NOT NULL,
+      amount DECIMAL(12,2) NOT NULL,
+      deduction_date DATE NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'pending',
+      created_by INT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_rep_deductions_rep (sales_rep_id),
+      INDEX idx_rep_deductions_date (deduction_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  // Tables created before status existed need the column added
+  try {
+    await db.query("ALTER TABLE sales_rep_deductions ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'pending' AFTER deduction_date");
+  } catch (e) {
+    if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+  }
+  for (const ddl of [
+    'ALTER TABLE sales_rep_deductions ADD COLUMN reviewed_by INT NULL',
+    'ALTER TABLE sales_rep_deductions ADD COLUMN reviewed_at DATETIME NULL',
+    // Set once the deduction has been posted to the ledger by a sales rep payroll run
+    'ALTER TABLE sales_rep_deductions ADD COLUMN journal_entry_id INT NULL',
+  ]) {
+    try {
+      await db.query(ddl);
+    } catch (e) {
+      if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+    }
+  }
+
+  // Salary advances given to sales reps. Approved advances are recovered from payroll until recovered_amount = amount.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS sales_rep_advances (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      sales_rep_id INT NOT NULL,
+      reference VARCHAR(100) NOT NULL,
+      amount DECIMAL(12,2) NOT NULL,
+      recovered_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+      advance_date DATE NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'pending',
+      created_by INT NULL,
+      reviewed_by INT NULL,
+      reviewed_at DATETIME NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_rep_advances_rep (sales_rep_id),
+      INDEX idx_rep_advances_date (advance_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Each payroll run that recovers part (or all) of an advance
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS sales_rep_advance_recoveries (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      advance_id INT NOT NULL,
+      sales_rep_id INT NOT NULL,
+      journal_entry_id INT NULL,
+      amount DECIMAL(12,2) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_advance_recoveries_advance (advance_id),
+      INDEX idx_advance_recoveries_journal (journal_entry_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await db.query(`
     CREATE TABLE IF NOT EXISTS payroll_runs (
       id INT PRIMARY KEY AUTO_INCREMENT,
       period_year INT NOT NULL,

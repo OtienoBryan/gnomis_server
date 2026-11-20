@@ -669,7 +669,10 @@ const controller = {
     const [[item]] = await db.query('SELECT * FROM payroll_run_items WHERE run_id = ? AND staff_id = ?', [id, staffId]);
     if (!item) return fail(res, 404, 'Payslip not found');
     const [[rep]] = await db.query('SELECT * FROM SalesRep WHERE id = ?', [staffId]);
-    const staff = rep ? { id: rep.id, name: rep.name, role: rep.role || null } : { id: staffId, name: item.staff_name };
+    const empNo = `EMP${String(staffId).padStart(3, '0')}`;
+    const staff = rep
+      ? { id: rep.id, name: rep.name, role: rep.role || null, employee_number: rep.employee_number || empNo, department: rep.department || 'Sales' }
+      : { id: staffId, name: item.staff_name, employee_number: empNo, department: 'Sales' };
     const [[profile]] = await db.query('SELECT kra_pin, nssf_no, shif_no, id_no, bank_name, bank_account FROM payroll_staff_profiles WHERE staff_id = ?', [staffId]);
     const b = parseBreakdown(item);
     res.json({ success: true, data: { run, staff, profile: profile || {}, payslip: { ...b, inputs: undefined } } });

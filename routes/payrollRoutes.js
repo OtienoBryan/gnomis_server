@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const payrollController = require('../controllers/payrollController');
 const run = require('../controllers/payrollRunController');
+const repDeductions = require('../controllers/salesRepDeductionController');
+const repAdvances = require('../controllers/salesRepAdvanceController');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 
 // Apply authentication middleware to all payroll routes
@@ -15,6 +17,18 @@ const MANAGE = requireRole(['admin', 'manager', 'accountant', 'executive', 'fina
 // Linking ledger accounts is allowed for the same roles that can view payroll (including sales);
 // it cannot change rates, approve or pay anything.
 router.put('/account-links', VIEW, run.saveAccountLinks);
+
+router.get('/sales-rep-deductions', VIEW, repDeductions.list);
+router.post('/sales-rep-deductions', VIEW, repDeductions.create); // sales may post; new rows are always pending
+const REVIEW_DEDUCTIONS = requireRole(['admin', 'manager', 'accountant', 'executive', 'sales', 'finance']);
+router.put('/sales-rep-deductions/:id/status', REVIEW_DEDUCTIONS, repDeductions.review);
+router.delete('/sales-rep-deductions/:id', MANAGE, repDeductions.remove);
+
+// Salary advances: sales can post and review; only finance-type roles can delete
+router.get('/sales-rep-advances', VIEW, repAdvances.list);
+router.post('/sales-rep-advances', VIEW, repAdvances.create); // new rows are always pending
+router.put('/sales-rep-advances/:id/status', REVIEW_DEDUCTIONS, repAdvances.review);
+router.delete('/sales-rep-advances/:id', MANAGE, repAdvances.remove);
 
 router.get('/accounts', VIEW, run.getAccounts);
 router.get('/settings', VIEW, run.getSettings);
@@ -82,5 +96,8 @@ router.post('/run-sales-reps', payrollController.runSalesRepPayroll);
 
 // GET /api/payroll/sales-reps-history?sales_rep_id=...
 router.get('/sales-reps-history', payrollController.getSalesRepPayrollHistory);
+
+// GET /api/payroll/sales-reps-history/:id  (payslip: record + deduction breakdown)
+router.get('/sales-reps-history/:id', VIEW, payrollController.getSalesRepPayslip);
 
 module.exports = router;
