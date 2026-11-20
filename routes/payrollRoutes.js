@@ -91,6 +91,13 @@ router.put('/deductions/:id', payrollController.updateDeduction);
 // DELETE /api/payroll/deductions/:id
 router.delete('/deductions/:id', payrollController.deleteDeduction);
 
+// Staff (employees) payroll: attendance-prorated, once per period
+const staffPay = require('../controllers/staffPayrollController');
+router.get('/staff-pay/summary', VIEW, staffPay.getSummary);
+router.post('/staff-pay/run', VIEW, staffPay.runPayroll);
+router.get('/staff-pay/history', VIEW, staffPay.getHistory);
+router.get('/staff-pay/history/:id', VIEW, staffPay.getPayslip);
+
 // POST /api/payroll/run-sales-reps
 router.post('/run-sales-reps', payrollController.runSalesRepPayroll);
 

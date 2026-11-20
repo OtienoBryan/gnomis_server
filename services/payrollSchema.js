@@ -196,6 +196,28 @@ const createTables = async () => {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  // Payroll posted for employees in the staff table (attendance-prorated, once per period)
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_payroll_history (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      staff_id INT NOT NULL,
+      pay_date DATE NOT NULL,
+      period_start DATE NOT NULL,
+      period_end DATE NOT NULL,
+      basic_salary DECIMAL(12,2) NOT NULL DEFAULT 0,
+      working_days INT NOT NULL DEFAULT 0,
+      days_paid DECIMAL(8,2) NOT NULL DEFAULT 0,
+      gross_pay DECIMAL(12,2) NOT NULL DEFAULT 0,
+      total_deductions DECIMAL(12,2) NOT NULL DEFAULT 0,
+      net_pay DECIMAL(12,2) NOT NULL DEFAULT 0,
+      journal_entry_id INT NULL,
+      notes TEXT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_staff_payroll_staff (staff_id),
+      INDEX idx_staff_payroll_period (period_start, period_end)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
   await db.query(`
     CREATE TABLE IF NOT EXISTS payroll_runs (
       id INT PRIMARY KEY AUTO_INCREMENT,

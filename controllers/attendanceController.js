@@ -99,7 +99,7 @@ const attendanceController = {
   updateAttendance: async (req, res) => {
     try {
       const { id } = req.params;
-      const { checkin_time, checkout_time, date } = req.body;
+      const { checkin_time, checkout_time, date, checkout_only } = req.body;
 
       // Validate required fields
       if (!date) {
@@ -120,9 +120,9 @@ const attendanceController = {
         updated_at: new Date()
       };
 
-      // Update the record and mark as corrected
+      // Update the record. Posting only a missing check-out is not a correction, so it stays "Original".
       await db.query(
-        'UPDATE attendance SET date = ?, checkin_time = ?, checkout_time = ?, corrected = 1, updated_at = ? WHERE id = ?',
+        `UPDATE attendance SET date = ?, checkin_time = ?, checkout_time = ?, ${checkout_only ? '' : 'corrected = 1, '}updated_at = ? WHERE id = ?`,
         [updateData.date, updateData.checkin_time, updateData.checkout_time, updateData.updated_at, id]
       );
 
