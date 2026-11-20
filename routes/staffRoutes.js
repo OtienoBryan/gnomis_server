@@ -8,7 +8,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 const documentController = require('../controllers/documentController');
 const calendarTaskController = require('../controllers/calendarTaskController');
 const publicHolidaysController = require('../controllers/publicHolidaysController');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, requireRole } = require('../middleware/auth');
 //const upload = multer({ dest: 'http://www.citlogisticssystems.com/woosh/admin/upload/staff/' });
 
 // Apply authentication middleware to all staff routes
@@ -107,6 +107,9 @@ router.put('/attendance/:id', attendanceController.updateAttendance);
 
 // GET /api/employee-working-hours
 router.get('/employee-working-hours', staffController.getEmployeeWorkingHours);
+// POST/PUT /api/employee-working-hours (post record / update check-out)
+router.post('/employee-working-hours', requireRole(['admin', 'manager', 'executive', 'hr']), staffController.createWorkingHourRecord);
+router.put('/employee-working-hours/:id', requireRole(['admin', 'manager', 'executive', 'hr']), staffController.updateWorkingHourRecord);
 // GET /api/employee-working-days
 router.get('/employee-working-days', staffController.getEmployeeWorkingDays);
 // GET /api/out-of-office-requests

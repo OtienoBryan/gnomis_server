@@ -1042,6 +1042,62 @@ const staffController = {
       res.status(500).json({ message: 'Failed to delete warning', error: error.message });
     }
   },
+  // POST /api/employee-working-hours  { staff_id, date, checkin_time: 'HH:MM', checkout_time?: 'HH:MM' }
+  createWorkingHourRecord: async (req, res) => {
+    try {
+      const { staff_id, date, checkin_time, checkout_time } = req.body || {};
+      const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/;
+      if (!staff_id || !date || !checkin_time) {
+        return res.status(400).json({ message: 'Staff, date and check-in time are required' });
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ message: 'Invalid date' });
+      if (!timeRe.test(checkin_time)) return res.status(400).json({ message: 'Invalid check-in time' });
+      if (checkout_time && !timeRe.test(checkout_time)) return res.status(400).json({ message: 'Invalid check-out time' });
+      if (checkout_time && checkout_time <= checkin_time) {
+        return res.status(400).json({ message: 'Check-out time must be after check-in time' });
+      }
+      const [staff] = await db.query('SELECT id FROM staff WHERE id = ?', [staff_id]);
+      if (staff.length === 0) return res.status(404).json({ message: 'Staff member not found' });
+      const [existing] = await db.query('SELECT id FROM staff_attendance WHERE user_id = ? AND date = ?', [staff_id, date]);
+      if (existing.length > 0) {
+        return res.status(409).json({ message: 'An attendance record already exists for this staff member on that date. Update its check-out instead.' });
+      }
+      const [result] = await db.query(
+        'INSERT INTO staff_attendance (user_id, date, checkin_time, checkout_time, status) VALUES (?, ?, ?, ?, 1)',
+        [staff_id, date, `${date} ${checkin_time}:00`, checkout_time ? `${date} ${checkout_time}:00` : '']
+      );
+      res.status(201).json({ id: result.insertId, message: 'Record posted' });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to post record', error: error.message });
+    }
+  },
+
+  // PUT /api/employee-working-hours/:id  { checkout_time: 'HH:MM' } (checkin_time optional)
+  updateWorkingHourRecord: async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { checkout_time, checkin_time } = req.body || {};
+      const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/;
+      const [rows] = await db.query('SELECT * FROM staff_attendance WHERE id = ?', [id]);
+      if (rows.length === 0) return res.status(404).json({ message: 'Record not found' });
+      const rec = rows[0];
+      const date = String(rec.date).slice(0, 10);
+      const newIn = checkin_time ? checkin_time : String(rec.checkin_time || '').slice(11, 16);
+      if (checkin_time && !timeRe.test(checkin_time)) return res.status(400).json({ message: 'Invalid check-in time' });
+      if (!checkout_time || !timeRe.test(checkout_time)) return res.status(400).json({ message: 'Valid check-out time is required' });
+      if (newIn && checkout_time <= newIn) {
+        return res.status(400).json({ message: 'Check-out time must be after check-in time' });
+      }
+      await db.query(
+        'UPDATE staff_attendance SET checkout_time = ?, checkin_time = ? WHERE id = ?',
+        [`${date} ${checkout_time}:00`, checkin_time ? `${date} ${checkin_time}:00` : rec.checkin_time, id]
+      );
+      res.json({ message: 'Record updated' });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to update record', error: error.message });
+    }
+  },
+
   getEmployeeWorkingHours: async (req, res) => {
     try {
       const { start_date, end_date, staff_id } = req.query;
@@ -1152,7 +1208,9 @@ const staffController = {
       const results = attendance.map(a => {
         let status = 'Absent';
         let time_spent = '';
-        
+        const LUNCH_MINUTES = 30;
+        let lunch_minutes = 0;
+
         // Parse VARCHAR date/time fields
         // checkin_time and checkout_time are VARCHAR, so we need to parse them
         if (a.checkin_time && a.checkin_time !== '' && a.checkin_time !== 'NULL') {
@@ -1173,7 +1231,12 @@ const staffController = {
               time_spent = '-';
             } else {
               const end = checkout && !isNaN(checkout.getTime()) ? checkout : new Date();
-              const diffMs = end.getTime() - checkin.getTime();
+              let diffMs = end.getTime() - checkin.getTime();
+              // Deduct the 30-minute lunch break (only when the span is longer than the break)
+              if (diffMs > LUNCH_MINUTES * 60 * 1000) {
+                diffMs -= LUNCH_MINUTES * 60 * 1000;
+                lunch_minutes = LUNCH_MINUTES;
+              }
               if (diffMs > 0) {
                 const hours = Math.floor(diffMs / (1000 * 60 * 60));
                 const mins = Math.floor((diffMs / (1000 * 60)) % 60);
@@ -1201,11 +1264,13 @@ const staffController = {
         
         return {
           id: a.id,
+          staff_id: a.staff_id,
           name: a.name || 'Unknown',
           department: a.department || 'N/A',
           date: a.date,
           checkin_time: a.checkin_time,
           checkout_time: a.checkout_time,
+          lunch_minutes,
           time_spent,
           status,
         };
