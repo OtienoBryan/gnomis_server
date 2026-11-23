@@ -28,6 +28,9 @@ router.post('/sales-reps', salesController.createSalesRep);
 // Update a sales rep
 router.put('/sales-reps/:id', salesController.updateSalesRep);
 
+// Extended profile (offer details, beneficiaries, etc.)
+router.get('/sales-reps/:id/profile', salesController.getSalesRepProfile);
+
 // Update status of a sales rep
 router.patch('/sales-reps/:id/status', salesController.updateSalesRepStatus);
 

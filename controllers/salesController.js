@@ -132,8 +132,47 @@ const findStaffByPhone = async (phone, excludeId) => {
 };
 
 // Create a new sales rep
+// ---- Extended sales rep profile (offer, beneficiaries, emergency, family, statutory, bank, education, experience, references) ----
+let profileTableReady = false;
+const ensureProfileTable = async () => {
+  if (profileTableReady) return;
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS sales_rep_profiles (
+      sales_rep_id INT NOT NULL PRIMARY KEY,
+      details LONGTEXT NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )
+  `);
+  profileTableReady = true;
+};
+
+const saveSalesRepProfile = async (salesRepId, profile) => {
+  if (!profile || typeof profile !== 'object') return;
+  await ensureProfileTable();
+  await db.query(
+    'INSERT INTO sales_rep_profiles (sales_rep_id, details) VALUES (?, ?) ON DUPLICATE KEY UPDATE details = VALUES(details)',
+    [salesRepId, JSON.stringify(profile)]
+  );
+};
+
+// Get a sales rep's extended profile
+exports.getSalesRepProfile = async (req, res) => {
+  try {
+    await ensureProfileTable();
+    const [rows] = await db.query('SELECT details FROM sales_rep_profiles WHERE sales_rep_id = ?', [req.params.id]);
+    let details = {};
+    if (rows.length && rows[0].details) {
+      try { details = JSON.parse(rows[0].details); } catch { details = {}; }
+    }
+    res.json(details);
+  } catch (err) {
+    console.error('Error fetching sales rep profile:', err);
+    res.status(500).json({ error: 'Failed to fetch sales rep profile', details: err.message });
+  }
+};
+
 exports.createSalesRep = async (req, res) => {
-  const { name, email, phoneNumber, country, region, route, photo, role, expected_weekly_coverage, basic_salary } = req.body;
+  const { name, email, phoneNumber, country, region, route, photo, role, expected_weekly_coverage, basic_salary, profile } = req.body;
   try {
     const duplicate = await findStaffByPhone(phoneNumber);
     if (duplicate) {
@@ -169,6 +208,7 @@ exports.createSalesRep = async (req, res) => {
       'INSERT INTO SalesRep (name, email, phoneNumber, country, region, region_id, route_name_update, route_id_update, photoUrl, role, expected_weekly_coverage, basic_salary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [name, email, phoneNumber, country, region, region_id, route, route_id_update, photo, role || 'sales rep', expected_weekly_coverage || null, basic_salary || null]
     );
+    await saveSalesRepProfile(result.insertId, profile);
     res.status(201).json({
       id: result.insertId,
       name,
@@ -192,7 +232,7 @@ exports.createSalesRep = async (req, res) => {
 // Update a sales rep
 exports.updateSalesRep = async (req, res) => {
   const { id } = req.params;
-  const { name, email, phone, country, region, route_name_update, photoUrl, role, expected_weekly_coverage, basic_salary } = req.body;
+  const { name, email, phone, country, region, route_name_update, photoUrl, role, expected_weekly_coverage, basic_salary, profile } = req.body;
   console.log('Update Sales Rep called');
   console.log('Params id:', id);
   console.log('Body:', req.body);
@@ -274,6 +314,7 @@ exports.updateSalesRep = async (req, res) => {
       `UPDATE SalesRep SET ${updates.join(', ')} WHERE id = ?`,
       values
     );
+    await saveSalesRepProfile(id, profile);
     
     res.json({ 
       id, 
