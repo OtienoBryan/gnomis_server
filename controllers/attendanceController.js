@@ -99,7 +99,7 @@ const attendanceController = {
   updateAttendance: async (req, res) => {
     try {
       const { id } = req.params;
-      const { checkin_time, checkout_time, date, checkout_only } = req.body;
+      const { checkin_time, checkout_time, date } = req.body;
 
       // Validate required fields
       if (!date) {
@@ -120,9 +120,9 @@ const attendanceController = {
         updated_at: new Date()
       };
 
-      // Update the record. Posting only a missing check-out is not a correction, so it stays "Original".
+      // Update the record
       await db.query(
-        `UPDATE attendance SET date = ?, checkin_time = ?, checkout_time = ?, ${checkout_only ? '' : 'corrected = 1, '}updated_at = ? WHERE id = ?`,
+        'UPDATE attendance SET date = ?, checkin_time = ?, checkout_time = ?, updated_at = ? WHERE id = ?',
         [updateData.date, updateData.checkin_time, updateData.checkout_time, updateData.updated_at, id]
       );
 
@@ -155,39 +155,10 @@ const attendanceController = {
         return res.status(404).json({ message: 'Staff member not found' });
       }
 
-      // Check if attendance record already exists for this staff and date
-      const [existing] = await db.query(
-        'SELECT id FROM attendance WHERE staff_id = ? AND date = ?',
-        [staff_id, date]
-      );
-      if (existing.length > 0) {
-        return res.status(400).json({ 
-          message: `Attendance record already exists for this staff member on ${new Date(date).toLocaleDateString()}. Please choose a different date or edit the existing record.` 
-        });
-      }
-
-      // Check monthly limit (max 2 records per month per employee)
-      // Count ALL records (both original and corrected) for the limit
-      const recordDate = new Date(date);
-      const year = recordDate.getFullYear();
-      const month = recordDate.getMonth() + 1; // getMonth() returns 0-11, so add 1
-      
-      const [monthlyRecords] = await db.query(
-        'SELECT COUNT(*) as count FROM attendance WHERE staff_id = ? AND YEAR(date) = ? AND MONTH(date) = ?',
-        [staff_id, year, month]
-      );
-      
-      if (monthlyRecords[0].count >= 2) {
-        const monthName = recordDate.toLocaleString('default', { month: 'long' });
-        return res.status(400).json({ 
-          message: `Maximum of 2 attendance records per month allowed. This employee already has 2 records for ${monthName} ${year}.` 
-        });
-      }
-
-      // Create the record (manually created records are marked as corrected)
+      // Create the record
       const [result] = await db.query(
-        'INSERT INTO attendance (staff_id, date, checkin_time, checkout_time, corrected, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [staff_id, date, checkin_time || null, checkout_time || null, 1, new Date(), new Date()]
+        'INSERT INTO attendance (staff_id, date, checkin_time, checkout_time, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [staff_id, date, checkin_time || null, checkout_time || null, new Date(), new Date()]
       );
 
       // Return created record with staff information
