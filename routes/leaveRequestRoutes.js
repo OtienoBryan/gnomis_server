@@ -27,6 +27,20 @@ router.get('/compassionate-leave-report', leaveRequestController.getCompassionat
 // GET /api/leave-requests/paternal-leave-report
 router.get('/paternal-leave-report', leaveRequestController.getPaternalLeaveReport);
 
+// Posting leave from the Employee Leaves page (with leave balance check)
+const multer = require('multer');
+const leavePosting = require('../controllers/leavePostingController');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+// GET /api/leave-requests/leave-types
+router.get('/leave-types', leavePosting.getLeaveTypes);
+
+// GET /api/leave-requests/balance?employee_id=&leave_type_id=&start_date=&end_date=
+router.get('/balance', leavePosting.getBalance);
+
+// POST /api/leave-requests  (multipart, optional "attachment" file)
+router.post('/', upload.single('attachment'), leavePosting.createLeave);
+
 // PATCH /api/leave-requests/:id/status
 router.patch('/:id/status', leaveRequestController.updateLeaveRequestStatus);
 

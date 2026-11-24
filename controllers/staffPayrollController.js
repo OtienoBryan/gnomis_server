@@ -1,5 +1,6 @@
 const db = require('../database/db');
 const { ensurePayrollSchema } = require('../services/payrollSchema');
+const { sendPayslipEmail } = require('../services/emailService');
 
 // ---- Staff payroll (employees in the `staff` table) ----
 // Works like the sales rep payroll: pay is prorated by attendance (days present + approved leave,
@@ -8,6 +9,8 @@ const { ensurePayrollSchema } = require('../services/payrollSchema');
 //   Debit  expense account      = gross pay
 //   Credit payment account      = net pay
 //   Credit each deduction's linked liability account = deduction amount
+//   Credit the "Staff loans receivable" account (payroll_settings.staff_loans_account_id)
+//     = recovery of approved staff_advances (oldest first, up to the pay that is left)
 // An employee can only be paid once per period.
 
 const isoDay = (d) => {
@@ -71,7 +74,8 @@ const loadDays = async (conn, staffIds, start, end) => {
   const [leaves] = await conn.query(
     `SELECT employee_id AS id, start_date, end_date FROM leave_requests
      WHERE employee_id IN (?) AND (salesrep IS NULL OR salesrep = 0)
-     AND CAST(status AS UNSIGNED) = 1 AND start_date <= ? AND end_date >= ?`,
+     AND CAST(status AS UNSIGNED) = 1 AND COALESCE(is_unpaid, 0) = 0
+     AND start_date <= ? AND end_date >= ?`,
     [staffIds, end, start]
   );
   leaves.forEach(lv => {
@@ -86,7 +90,22 @@ const loadDays = async (conn, staffIds, start, end) => {
   return { presentByStaff, leaveByStaff };
 };
 
-const computePay = (staff, presentSet, leaveDays, numWorkingDays, deductions) => {
+// Approved staff advances (dated on or before the period end) that still have a balance, grouped by staff id
+const loadAdvances = async (conn, staffIds, periodEnd, lock = false) => {
+  const byStaff = {};
+  if (staffIds.length === 0) return { rows: [], byStaff };
+  const [rows] = await conn.query(
+    `SELECT id, staff_id, reference, amount, recovered_amount FROM staff_advances
+     WHERE status = 'approved' AND amount > recovered_amount
+     AND advance_date <= ? AND staff_id IN (?)
+     ORDER BY advance_date, id${lock ? ' FOR UPDATE' : ''}`,
+    [periodEnd, staffIds]
+  );
+  rows.forEach(r => { (byStaff[r.staff_id] = byStaff[r.staff_id] || []).push(r); });
+  return { rows, byStaff };
+};
+
+const computePay = (staff, presentSet, leaveDays, numWorkingDays, deductions, advances = []) => {
   const present = presentSet ? presentSet.size : 0;
   const basic = staff.salary != null ? Number(staff.salary) : 0;
   const daysPaid = Math.min(numWorkingDays || 0, present + (leaveDays || 0)) || present + (leaveDays || 0);
@@ -96,11 +115,80 @@ const computePay = (staff, presentSet, leaveDays, numWorkingDays, deductions) =>
     .filter(l => l.amount > 0);
   let totalDeductions = lines.reduce((s, l) => s + l.amount, 0);
   if (totalDeductions > gross) totalDeductions = gross; // deductions can't exceed gross pay
+
+  // Salary advances: recover oldest first, up to whatever pay is left. A partly recovered
+  // advance keeps its balance for the next run.
+  let budget = round2(gross) - round2(totalDeductions);
+  const recoveries = [];
+  for (const a of advances) {
+    if (budget < 0.01) break;
+    const balance = round2(Number(a.amount) - Number(a.recovered_amount));
+    const take = Math.floor(Math.min(balance, budget) * 100) / 100;
+    if (take <= 0) continue;
+    recoveries.push({ advance: a, amount: take });
+    budget -= take;
+  }
+  const advanceTotal = round2(recoveries.reduce((sum, r) => sum + r.amount, 0));
+
   return {
     present, leave: leaveDays || 0, daysPaid, basic_salary: basic,
-    gross_pay: round2(gross), deductions: lines, total_deductions: round2(totalDeductions),
-    net_pay: round2(gross - totalDeductions),
+    gross_pay: round2(gross), deductions: lines,
+    advance_recovery: advanceTotal, advance_recoveries: recoveries,
+    total_deductions: round2(totalDeductions + advanceTotal),
+    net_pay: round2(round2(gross) - round2(totalDeductions) - advanceTotal),
   };
+};
+
+// Payslip record + deduction lines (from the journal entry), as shown on the payslip page
+const loadPayslip = async (id) => {
+  const [[record]] = await db.query(
+    `SELECT h.*, s.name AS staff_name, s.role AS staff_role, s.designation AS staff_designation,
+            s.department AS staff_department, s.empl_no AS staff_empl_no, s.business_email AS staff_email,
+            s.phone_number AS staff_phone,
+            DATE_FORMAT(h.pay_date, '%Y-%m-%d') AS pay_date,
+            DATE_FORMAT(h.period_start, '%Y-%m-%d') AS period_start,
+            DATE_FORMAT(h.period_end, '%Y-%m-%d') AS period_end
+     FROM staff_payroll_history h JOIN staff s ON h.staff_id = s.id WHERE h.id = ?`,
+    [id]
+  );
+  if (!record) return null;
+
+  let deductions = [];
+  if (record.journal_entry_id) {
+    const [lines] = await db.query(
+      `SELECT l.credit_amount AS amount, l.description, a.account_code, a.account_name
+       FROM journal_entry_lines l LEFT JOIN chart_of_accounts a ON a.id = l.account_id
+       WHERE l.journal_entry_id = ? AND l.line_number > 2 AND l.credit_amount > 0
+       ORDER BY l.line_number`,
+      [record.journal_entry_id]
+    );
+    deductions = lines.map(l => ({
+      name: String(l.description || '').replace(` for ${record.staff_name}`, ''),
+      account: [l.account_code, l.account_name].filter(Boolean).join(' - '),
+      amount: Number(l.amount),
+    }));
+  }
+  return { ...record, deductions };
+};
+
+const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
+
+// Emails each payslip as a PDF to the employee's personal email (the 'Personal Email' field on the staff form, stored in staff.business_email). Never throws: failures are reported per employee.
+const emailPayslips = async (slips) => {
+  const result = { sent: [], failed: [], no_email: [] };
+  for (const slip of slips) {
+    const who = { staff_id: slip.staff_id, name: slip.staff_name, payslip_id: slip.id };
+    const to = String(slip.staff_email || '').trim();
+    if (!isEmail(to)) { result.no_email.push(who); continue; }
+    try {
+      await sendPayslipEmail({ to, slip });
+      result.sent.push({ ...who, email: to });
+    } catch (err) {
+      console.error(`Failed to email payslip ${slip.id} to ${to}:`, err.message);
+      result.failed.push({ ...who, email: to, error: err.message });
+    }
+  }
+  return result;
 };
 
 const staffPayrollController = {
@@ -123,6 +211,7 @@ const staffPayrollController = {
       const numWorkingDays = countWorkingDays(start, end);
       const { presentByStaff, leaveByStaff } = await loadDays(db, ids, start, end);
       const [deductions] = await db.query('SELECT * FROM payroll_deductions WHERE is_active = 1');
+      const { byStaff: advancesByStaff } = await loadAdvances(db, ids, end);
 
       let paidIds = new Set();
       if (ids.length) {
@@ -133,13 +222,18 @@ const staffPayrollController = {
         paidIds = new Set(paid.map(p => p.staff_id));
       }
 
-      const data = staff.map(s => ({
-        id: s.id, name: s.name, role: s.role, designation: s.designation, department: s.department,
-        empl_no: s.empl_no, status: s.status,
-        working_days: numWorkingDays,
-        already_paid: paidIds.has(s.id),
-        ...computePay(s, presentByStaff[s.id], leaveByStaff[s.id], numWorkingDays, deductions),
-      }));
+      const data = staff.map(s => {
+        const { advance_recoveries, ...pay } = computePay(
+          s, presentByStaff[s.id], leaveByStaff[s.id], numWorkingDays, deductions, advancesByStaff[s.id]
+        );
+        return {
+          id: s.id, name: s.name, role: s.role, designation: s.designation, department: s.department,
+          empl_no: s.empl_no, status: s.status,
+          working_days: numWorkingDays,
+          already_paid: paidIds.has(s.id),
+          ...pay,
+        };
+      });
       res.json({ success: true, data, period: { start, end, working_days: numWorkingDays } });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
@@ -155,7 +249,7 @@ const staffPayrollController = {
     const connection = await db.getConnection();
     try {
       await connection.beginTransaction();
-      const { pay_date, period_start, period_end, staff_ids, payment_account_id, expense_account_id, notes } = req.body;
+      const { pay_date, period_start, period_end, staff_ids, payment_account_id, expense_account_id, notes, send_payslips } = req.body;
 
       if (!pay_date || !period_start || !period_end) {
         await connection.rollback();
@@ -208,11 +302,30 @@ const staffPayrollController = {
       const numWorkingDays = countWorkingDays(period_start, period_end);
       const { presentByStaff, leaveByStaff } = await loadDays(connection, pending.map(s => s.id), period_start, period_end);
       const [deductions] = await connection.query('SELECT * FROM payroll_deductions WHERE is_active = 1');
+      const { rows: advanceRows, byStaff: advancesByStaff } = await loadAdvances(connection, pending.map(s => s.id), period_end, true);
+
+      let advanceAccountId = null;
+      if (advanceRows.length > 0) {
+        const [[setting]] = await connection.query(
+          "SELECT setting_value FROM payroll_settings WHERE setting_key = 'staff_loans_account_id'"
+        );
+        advanceAccountId = setting?.setting_value ? Number(setting.setting_value) : null;
+        const [advanceAccountRows] = advanceAccountId
+          ? await connection.query('SELECT id FROM chart_of_accounts WHERE id = ? AND is_active = 1', [advanceAccountId])
+          : [[]];
+        if (advanceAccountRows.length === 0) {
+          await connection.rollback();
+          return res.status(400).json({
+            success: false,
+            error: "Approved staff salary advances are waiting to be recovered. Set 'Staff loans receivable' (the staff advances account) on Payroll Account Links first.",
+          });
+        }
+      }
 
       let processed = 0;
       const results = [];
       for (const s of pending) {
-        const c = computePay(s, presentByStaff[s.id], leaveByStaff[s.id], numWorkingDays, deductions);
+        const c = computePay(s, presentByStaff[s.id], leaveByStaff[s.id], numWorkingDays, deductions, advancesByStaff[s.id]);
         if (c.basic_salary <= 0 || c.gross_pay <= 0) continue;
 
         const [je] = await connection.query(
@@ -243,14 +356,30 @@ const staffPayrollController = {
             [jeId, d.account_id, d.amount, `${d.name} for ${s.name}`, line++]
           );
         }
-        await connection.query(
+        // One credit line per advance recovered, to the staff advances account
+        for (const r of c.advance_recoveries) {
+          await connection.query(
+            `INSERT INTO journal_entry_lines (journal_entry_id, account_id, debit_amount, credit_amount, description, line_number)
+             VALUES (?, ?, 0, ?, ?, ?)`,
+            [jeId, advanceAccountId, r.amount, `Salary advance recovery for ${s.name}: ${r.advance.reference}`, line++]
+          );
+          await connection.query(
+            'UPDATE staff_advances SET recovered_amount = recovered_amount + ? WHERE id = ?',
+            [r.amount, r.advance.id]
+          );
+          await connection.query(
+            'INSERT INTO staff_advance_recoveries (advance_id, staff_id, journal_entry_id, amount) VALUES (?,?,?,?)',
+            [r.advance.id, s.id, jeId, r.amount]
+          );
+        }
+        const [hist] = await connection.query(
           `INSERT INTO staff_payroll_history
            (staff_id, pay_date, period_start, period_end, basic_salary, working_days, days_paid, gross_pay, total_deductions, net_pay, journal_entry_id, notes)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [s.id, pay_date, period_start, period_end, c.basic_salary, numWorkingDays, c.daysPaid, c.gross_pay, c.total_deductions, c.net_pay, jeId, notes || null]
         );
         processed++;
-        results.push({ staff_id: s.id, name: s.name, gross_pay: c.gross_pay, total_deductions: c.total_deductions, net_pay: c.net_pay, journal_entry_id: jeId });
+        results.push({ payslip_id: hist.insertId, staff_id: s.id, name: s.name, gross_pay: c.gross_pay, total_deductions: c.total_deductions, advance_recovery: c.advance_recovery, net_pay: c.net_pay, journal_entry_id: jeId });
       }
 
       if (processed === 0) {
@@ -258,7 +387,23 @@ const staffPayrollController = {
         return res.status(400).json({ success: false, error: 'No staff had a positive salary/gross pay to process.' });
       }
       await connection.commit();
-      res.json({ success: true, message: 'Staff payroll processed', count: processed, skipped: staffList.length - pending.length, results });
+
+      // Email each employee their payslip PDF (the payroll is already posted; email problems are only reported)
+      let emails = null;
+      if (send_payslips !== false) {
+        const slips = [];
+        for (const r of results) {
+          try {
+            const slip = await loadPayslip(r.payslip_id);
+            if (slip) slips.push(slip);
+          } catch (err) {
+            console.error('Failed to load payslip for emailing:', err.message);
+          }
+        }
+        emails = await emailPayslips(slips);
+      }
+
+      res.json({ success: true, message: 'Staff payroll processed', count: processed, skipped: staffList.length - pending.length, results, emails });
     } catch (error) {
       await connection.rollback();
       res.status(500).json({ success: false, error: error.message });
@@ -291,34 +436,24 @@ const staffPayrollController = {
   getPayslip: async (req, res) => {
     try {
       await ensurePayrollSchema();
-      const [[record]] = await db.query(
-        `SELECT h.*, s.name AS staff_name, s.role AS staff_role, s.designation AS staff_designation,
-                s.department AS staff_department, s.empl_no AS staff_empl_no, s.business_email AS staff_email,
-                s.phone_number AS staff_phone,
-                DATE_FORMAT(h.pay_date, '%Y-%m-%d') AS pay_date,
-                DATE_FORMAT(h.period_start, '%Y-%m-%d') AS period_start,
-                DATE_FORMAT(h.period_end, '%Y-%m-%d') AS period_end
-         FROM staff_payroll_history h JOIN staff s ON h.staff_id = s.id WHERE h.id = ?`,
-        [req.params.id]
-      );
-      if (!record) return res.status(404).json({ success: false, error: 'Payslip not found' });
+      const slip = await loadPayslip(req.params.id);
+      if (!slip) return res.status(404).json({ success: false, error: 'Payslip not found' });
+      res.json({ success: true, data: slip });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  },
 
-      let deductions = [];
-      if (record.journal_entry_id) {
-        const [lines] = await db.query(
-          `SELECT l.credit_amount AS amount, l.description, a.account_code, a.account_name
-           FROM journal_entry_lines l LEFT JOIN chart_of_accounts a ON a.id = l.account_id
-           WHERE l.journal_entry_id = ? AND l.line_number > 2 AND l.credit_amount > 0
-           ORDER BY l.line_number`,
-          [record.journal_entry_id]
-        );
-        deductions = lines.map(l => ({
-          name: String(l.description || '').replace(` for ${record.staff_name}`, ''),
-          account: [l.account_code, l.account_name].filter(Boolean).join(' - '),
-          amount: Number(l.amount),
-        }));
-      }
-      res.json({ success: true, data: { ...record, deductions } });
+  // POST /api/payroll/staff-pay/history/:id/email  (re-send one payslip)
+  emailPayslip: async (req, res) => {
+    try {
+      await ensurePayrollSchema();
+      const slip = await loadPayslip(req.params.id);
+      if (!slip) return res.status(404).json({ success: false, error: 'Payslip not found' });
+      const result = await emailPayslips([slip]);
+      if (result.sent.length) return res.json({ success: true, data: result });
+      const reason = result.no_email.length ? 'This employee has no personal email address on their staff record (Edit Staff > Personal Email)' : (result.failed[0]?.error || 'Failed to send payslip');
+      res.status(400).json({ success: false, error: reason, data: result });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });
     }

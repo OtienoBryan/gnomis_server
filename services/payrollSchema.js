@@ -196,6 +196,45 @@ const createTables = async () => {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  // Salary advances given to staff (employees). Approved advances are recovered from staff payroll.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_advances (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      staff_id INT NOT NULL,
+      reference VARCHAR(100) NOT NULL,
+      amount DECIMAL(12,2) NOT NULL,
+      recovered_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+      advance_date DATE NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'pending',
+      created_by INT NULL,
+      reviewed_by INT NULL,
+      reviewed_at DATETIME NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_staff_advances_staff (staff_id),
+      INDEX idx_staff_advances_date (advance_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS staff_advance_recoveries (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      advance_id INT NOT NULL,
+      staff_id INT NOT NULL,
+      journal_entry_id INT NULL,
+      amount DECIMAL(12,2) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_staff_advance_recoveries_advance (advance_id),
+      INDEX idx_staff_advance_recoveries_journal (journal_entry_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Unpaid leave (or the part of a leave beyond the staff member's balance) is not paid by staff payroll
+  try {
+    await db.query('ALTER TABLE leave_requests ADD COLUMN is_unpaid TINYINT(1) NOT NULL DEFAULT 0');
+  } catch (e) {
+    if (e.code !== 'ER_DUP_FIELDNAME' && e.code !== 'ER_NO_SUCH_TABLE') throw e;
+  }
+
   // Payroll posted for employees in the staff table (attendance-prorated, once per period)
   await db.query(`
     CREATE TABLE IF NOT EXISTS staff_payroll_history (

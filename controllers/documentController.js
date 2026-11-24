@@ -531,4 +531,5 @@ const documentController = {
   },
 };
 
-module.exports = documentController; 
+module.exports = documentController;
+module.exports.storeUploadedFile = storeUploadedFile; 

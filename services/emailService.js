@@ -80,4 +80,32 @@ const sendInvoiceEmail = async ({ to, cc, subject, message, order, invoiceNumber
   return data;
 };
 
-module.exports = { sendInvoiceEmail };
+// Staff payslip: short covering email with the payslip PDF attached
+const sendPayslipEmail = async ({ to, slip }) => {
+  const from = process.env.RESEND_FROM_EMAIL;
+  if (!from) throw new Error('RESEND_FROM_EMAIL is not configured on the server');
+  const { buildStaffPayslipPdf } = require('./payslipPdf');
+  const pdf = await buildStaffPayslipPdf(slip);
+  const period = `${String(slip.period_start).slice(0, 10)} to ${String(slip.period_end).slice(0, 10)}`;
+  const firstName = String(slip.staff_name || '').trim().split(/\s+/)[0] || 'there';
+  const { data, error } = await getClient().emails.send({
+    from,
+    to: [to],
+    subject: `Your payslip for ${period} - Gnomis Quality Products`,
+    html: `<div style="font-family:Arial,sans-serif;color:#374151;font-size:14px;max-width:600px">
+      <p>Dear ${escapeHtml(firstName)},</p>
+      <p>Please find attached your payslip for the period <strong>${escapeHtml(period)}</strong>.</p>
+      <p>Net pay: <strong>KES ${money(slip.net_pay)}</strong></p>
+      <p>If you have any questions about your pay, please contact HR.</p>
+      <p style="color:#6b7280;font-size:12px;margin-top:24px">Gnomis Quality Products &middot; P.O Box 15470, Nairobi Kenya</p>
+    </div>`,
+    attachments: [{
+      filename: `payslip-${String(slip.staff_name || 'staff').replace(/[^a-z0-9]+/gi, '-')}-${String(slip.period_start).slice(0, 7)}.pdf`,
+      content: pdf,
+    }],
+  });
+  if (error) throw new Error(error.message || 'Resend failed to send the email');
+  return data;
+};
+
+module.exports = { sendInvoiceEmail, sendPayslipEmail };

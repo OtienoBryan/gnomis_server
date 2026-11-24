@@ -4,6 +4,7 @@ const payrollController = require('../controllers/payrollController');
 const run = require('../controllers/payrollRunController');
 const repDeductions = require('../controllers/salesRepDeductionController');
 const repAdvances = require('../controllers/salesRepAdvanceController');
+const staffAdvances = require('../controllers/staffAdvanceController');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 
 // Apply authentication middleware to all payroll routes
@@ -24,11 +25,18 @@ const REVIEW_DEDUCTIONS = requireRole(['admin', 'manager', 'accountant', 'execut
 router.put('/sales-rep-deductions/:id/status', REVIEW_DEDUCTIONS, repDeductions.review);
 router.delete('/sales-rep-deductions/:id', MANAGE, repDeductions.remove);
 
-// Salary advances: sales can post and review; only finance-type roles can delete
+// Salary advances: sales and hr can post and review; only finance-type roles can delete
+const REVIEW_ADVANCES = requireRole(['admin', 'manager', 'accountant', 'executive', 'sales', 'finance', 'hr']);
 router.get('/sales-rep-advances', VIEW, repAdvances.list);
 router.post('/sales-rep-advances', VIEW, repAdvances.create); // new rows are always pending
-router.put('/sales-rep-advances/:id/status', REVIEW_DEDUCTIONS, repAdvances.review);
+router.put('/sales-rep-advances/:id/status', REVIEW_ADVANCES, repAdvances.review);
 router.delete('/sales-rep-advances/:id', MANAGE, repAdvances.remove);
+
+// Staff (employee) salary advances: same permissions as sales rep advances
+router.get('/staff-advances', VIEW, staffAdvances.list);
+router.post('/staff-advances', VIEW, staffAdvances.create); // new rows are always pending
+router.put('/staff-advances/:id/status', REVIEW_ADVANCES, staffAdvances.review);
+router.delete('/staff-advances/:id', MANAGE, staffAdvances.remove);
 
 router.get('/accounts', VIEW, run.getAccounts);
 router.get('/settings', VIEW, run.getSettings);
@@ -97,6 +105,7 @@ router.get('/staff-pay/summary', VIEW, staffPay.getSummary);
 router.post('/staff-pay/run', VIEW, staffPay.runPayroll);
 router.get('/staff-pay/history', VIEW, staffPay.getHistory);
 router.get('/staff-pay/history/:id', VIEW, staffPay.getPayslip);
+router.post('/staff-pay/history/:id/email', VIEW, staffPay.emailPayslip);
 
 // POST /api/payroll/run-sales-reps
 router.post('/run-sales-reps', payrollController.runSalesRepPayroll);

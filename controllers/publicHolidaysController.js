@@ -1,25 +1,26 @@
 const db = require('../database/db');
+const { getHolidaysInRange } = require('../services/publicHolidaysService');
 
 const publicHolidaysController = {
   // Get all public holidays
   getAllHolidays: async (req, res) => {
     try {
       const { country, year } = req.query;
-      let query = 'SELECT id, name, date, country, is_recurring FROM public_holidays WHERE 1=1';
+
+      if (year) {
+        // Include recurring holidays projected into the requested year
+        const rows = await getHolidaysInRange(`${year}-01-01`, `${year}-12-31`, country);
+        return res.json(rows);
+      }
+
+      let query = "SELECT id, name, DATE_FORMAT(date, '%Y-%m-%d') AS date, country, is_recurring FROM public_holidays WHERE 1=1";
       const params = [];
-      
       if (country) {
         query += ' AND country = ?';
         params.push(country);
       }
-      
-      if (year) {
-        query += ' AND YEAR(date) = ?';
-        params.push(year);
-      }
-      
       query += ' ORDER BY date ASC';
-      
+
       const [rows] = await db.query(query, params);
       res.json(rows);
     } catch (error) {
@@ -36,13 +37,10 @@ const publicHolidaysController = {
         return res.status(400).json({ message: 'Month is required (YYYY-MM)' });
       }
       
-      const [rows] = await db.query(
-        `SELECT id, name, date, country, is_recurring 
-         FROM public_holidays 
-         WHERE DATE_FORMAT(date, "%Y-%m") = ? 
-         ORDER BY date ASC`,
-        [month]
-      );
+      const [y, m] = month.split('-').map(Number);
+      const lastDay = new Date(y, m, 0).getDate();
+      const mm = String(m).padStart(2, '0');
+      const rows = await getHolidaysInRange(`${y}-${mm}-01`, `${y}-${mm}-${String(lastDay).padStart(2, '0')}`);
       res.json(rows);
     } catch (error) {
       console.error('Error fetching holidays by month:', error);
@@ -71,7 +69,7 @@ const publicHolidaysController = {
       
       const [result] = await db.query(
         'INSERT INTO public_holidays (name, date, country, is_recurring) VALUES (?, ?, ?, ?)',
-        [name, date, country || 'Kenya', is_recurring || false]
+        [name, date, country || 'Kenya', is_recurring === undefined ? true : !!is_recurring]
       );
       
       res.status(201).json({
@@ -79,7 +77,7 @@ const publicHolidaysController = {
         name,
         date,
         country: country || 'Kenya',
-        is_recurring: is_recurring || false
+        is_recurring: is_recurring === undefined ? true : !!is_recurring
       });
     } catch (error) {
       console.error('Error adding public holiday:', error);

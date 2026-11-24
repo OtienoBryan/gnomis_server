@@ -204,9 +204,11 @@ exports.createSalesRep = async (req, res) => {
       }
     }
 
+    // The SalesRep columns below are NOT NULL, so an unmatched region/route is stored as 0 and
+    // missing text as '' (sending NULL fails with "Column 'region_id' cannot be null")
     const [result] = await db.query(
-      'INSERT INTO SalesRep (name, email, phoneNumber, country, region, region_id, route_name_update, route_id_update, photoUrl, role, expected_weekly_coverage, basic_salary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [name, email, phoneNumber, country, region, region_id, route, route_id_update, photo, role || 'sales rep', expected_weekly_coverage || null, basic_salary || null]
+      'INSERT INTO SalesRep (name, email, phoneNumber, country, region, region_id, route_name_update, route_id_update, photoUrl, role, expected_weekly_coverage, basic_salary, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3))',
+      [name, email || '', phoneNumber || '', country || '', region || '', region_id ?? 0, route || '', route_id_update ?? 0, photo || '', role || 'sales rep', expected_weekly_coverage || null, basic_salary || null]
     );
     await saveSalesRepProfile(result.insertId, profile);
     res.status(201).json({

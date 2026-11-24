@@ -2,6 +2,7 @@ const db = require('../database/db');
 const path = require('path');
 const fs = require('fs');
 const cloudinary = require('../config/cloudinary');
+const { getHolidaysInRange } = require('../services/publicHolidaysService');
 
 const staffController = {
   getAllStaff: async (req, res) => {
@@ -1315,20 +1316,19 @@ const staffController = {
         WHERE date >= ? AND date <= ?
       `, [startDate, endDate]);
       // Get all leaves for the month
+      // status is stored as a number (1 = approved); only staff leaves, not sales rep leaves
       const [leaves] = await db.query(`
-        SELECT employee_id, start_date, end_date, status
+        SELECT employee_id, DATE_FORMAT(start_date, '%Y-%m-%d') AS start_date, DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date, status
         FROM leave_requests
-        WHERE status = 'approved' AND start_date <= ? AND end_date >= ?
+        WHERE CAST(status AS UNSIGNED) = 1 AND (salesrep IS NULL OR salesrep = 0)
+          AND start_date <= ? AND end_date >= ?
       `, [endDate, startDate]);
       // Get Kenya public holidays for the month from public_holidays table
       let holidayCount = 0;
+      const holidayDates = new Set();
       try {
-        const [holidays] = await db.query(`
-          SELECT DISTINCT date, name
-          FROM public_holidays
-          WHERE date >= ? AND date <= ?
-          AND country = 'Kenya'
-        `, [startDate, endDate]);
+        // Includes recurring holidays projected into this month
+        const holidays = await getHolidaysInRange(startDate, endDate, 'Kenya');
         
         console.log(`[Kenya Holidays] Found ${holidays.length} public holidays for ${month}`);
         
@@ -1345,7 +1345,8 @@ const staffController = {
           const dateObj = new Date(dateStr + 'T00:00:00'); // Add time to avoid timezone issues
           const dayOfWeek = dateObj.getDay();
           
-          // Count all holidays (including those that fall on Sundays as they're still public holidays)
+          // Collect holiday dates (de-duplicated with Sundays below)
+          holidayDates.add(dateStr);
           holidayCount++;
           console.log(`[Kenya Holidays] ${dateStr} (${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dayOfWeek]}) - ${holiday.name}`);
         }
@@ -1356,6 +1357,13 @@ const staffController = {
         console.error('This might mean the public_holidays table does not exist. Please run: server/database/create_public_holidays_table.sql');
         // Continue with holidayCount = 0 if there's an error
       }
+      // Add all Sundays in the month to the holiday/weekend set (avoids double-counting holidays on Sundays)
+      for (let d = 1; d <= daysInMonth; d++) {
+        if (new Date(year, monthNum - 1, d).getDay() === 0) {
+          holidayDates.add(`${year}-${String(monthNum).padStart(2, '0')}-${String(d).padStart(2, '0')}`);
+        }
+      }
+      const holidaysAndWeekends = holidayDates.size;
       // For each staff, calculate days present, leave, absent
       const results = staff.map(emp => {
         // Build set of all working days in month (exclude Sundays)
@@ -1364,32 +1372,34 @@ const staffController = {
         const today = new Date();
         today.setHours(23, 59, 59, 999); // Set to end of today to include today
         
+        const ymd = (d) => `${year}-${String(monthNum).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
         for (let d = 1; d <= daysInMonth; d++) {
-          // Create date using Date constructor to avoid timezone issues
           const dateObj = new Date(year, monthNum - 1, d);
-          // Only include dates that are not in the future
+          // Only include dates that are not in the future. Use the local date string:
+          // toISOString() would shift the day back in timezones ahead of UTC (e.g. Kenya, UTC+3).
           if (dateObj.getDay() !== 0 && dateObj <= today) { // 0 = Sunday
-            days.push(dateObj.toISOString().slice(0, 10));
+            days.push(ymd(d));
           }
         }
         const effectiveWorkingDays = days.length;
         // Attendance days
         const presentDays = new Set(
-          attendance.filter(a => a.staff_id === emp.id && days.includes(a.date)).map(a => a.date)
+          attendance
+            .map(a => ({ ...a, date: String(a.date).slice(0, 10) }))
+            .filter(a => a.staff_id === emp.id && days.includes(a.date))
+            .map(a => a.date)
         );
-        // Leave days
-        const empLeaves = leaves.filter(lv => lv.employee_id === emp.id);
-        let leaveDays = 0;
-        for (const lv of empLeaves) {
-          const leaveStart = new Date(lv.start_date) < new Date(startDate) ? new Date(startDate) : new Date(lv.start_date);
-          const leaveEnd = new Date(lv.end_date) > new Date(endDate) ? new Date(endDate) : new Date(lv.end_date);
-          for (let d = new Date(leaveStart); d <= leaveEnd; d.setDate(d.getDate() + 1)) {
-            const dateStr = d.toISOString().slice(0, 10);
-            if (days.includes(dateStr)) leaveDays++;
+        // Leave days: approved leave on working days so far this month (days with a check-in are counted as present, not leave)
+        const leaveDates = new Set();
+        for (const lv of leaves.filter(l => l.employee_id === emp.id)) {
+          for (const day of days) {
+            if (day >= lv.start_date && day <= lv.end_date && !presentDays.has(day)) leaveDates.add(day);
           }
         }
-        // Absent days = total - present - leave
-        const absentDays = effectiveWorkingDays - presentDays.size - leaveDays;
+        const leaveDays = leaveDates.size;
+        // Absent days = working days so far with no check-in and no approved leave
+        const absentDates = days.filter(day => !presentDays.has(day) && !leaveDates.has(day));
+        const absentDays = absentDates.length;
         // Attendance percentage
         let attendance_pct = 'N/A';
         if (effectiveWorkingDays > 0) {
@@ -1399,11 +1409,14 @@ const staffController = {
           id: emp.id,
           name: emp.name,
           department: emp.department,
-          effective_working_days: effectiveWorkingDays,
+          effective_working_days: daysInMonth, // Show total calendar days in the month
           days_present: presentDays.size,
           leave_days: leaveDays,
-          absent_days: absentDays < 0 ? 0 : absentDays,
-          holidays: holidayCount,
+          absent_days: absentDays,
+          // Dates behind absent_days; public holidays among them are listed so the page can flag them
+          absent_dates: absentDates,
+          absent_holiday_dates: absentDates.filter(day => holidayDates.has(day)),
+          holidays: holidaysAndWeekends,
           attendance_pct,
         };
       });
