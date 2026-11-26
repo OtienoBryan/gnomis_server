@@ -1,5 +1,15 @@
 const db = require('../database/db');
 
+// "Printed" tracking on sales_orders, added on first use
+let printColumnsReady = false;
+const ensurePrintColumns = async () => {
+  if (printColumnsReady) return;
+  await db.query('ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS is_printed TINYINT(1) NOT NULL DEFAULT 0');
+  await db.query('ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS printed_at DATETIME NULL');
+  await db.query('ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS printed_by INT NULL');
+  printColumnsReady = true;
+};
+
 /**
  * Get all customer orders with consolidated data (orders, riders, stores)
  * Includes pagination support
@@ -25,7 +35,8 @@ const getCustomerOrdersData = async (req, res) => {
   console.log('Request query params:', req.query);
   
   try {
-    const { page = 1, limit = 10, status, rider_id, start_date, end_date, search, client_id, outlet_account_id } = req.query;
+    await ensurePrintColumns();
+    const { page = 1, limit = 10, status, rider_id, start_date, end_date, search, client_id, outlet_account_id, printed } = req.query;
     const currentUserId = req.user?.id;
     const currentUserRole = req.user?.role;
     
@@ -89,6 +100,11 @@ const getCustomerOrdersData = async (req, res) => {
 
     if (outlet_account_id) {
       addCommonCondition('c.outlet_account = ?', parseInt(outlet_account_id));
+    }
+
+    // printed=1 -> only printed orders, printed=0 -> only orders not yet printed
+    if (printed === '1' || printed === '0') {
+      addCommonCondition('so.is_printed = ?', parseInt(printed));
     }
 
     // Role-based access filtering
@@ -219,6 +235,9 @@ const getCustomerOrdersData = async (req, res) => {
         so.delivered_at,
         so.cancellation_comment,
         so.created_by,
+        so.is_printed,
+        so.printed_at,
+        pu.username as printed_by_name,
         c.name as customer_name,
         c.contact as customer_contact,
         c.balance as customer_balance,
@@ -238,6 +257,7 @@ const getCustomerOrdersData = async (req, res) => {
       LEFT JOIN Clients c ON so.client_id = c.id
       LEFT JOIN SalesRep sr ON so.salesrep = sr.id
       LEFT JOIN users u ON so.created_by = u.id
+      LEFT JOIN users pu ON so.printed_by = pu.id
       LEFT JOIN Riders r ON so.rider_id = r.id
       LEFT JOIN SalesRep d ON so.driver_id = d.id AND d.role = 'driver'
       LEFT JOIN delivery_vehicles v ON so.vehicle_id = v.id
@@ -386,7 +406,45 @@ const getCustomerOrdersData = async (req, res) => {
   }
 };
 
+/**
+ * PATCH /api/customer-orders/:id/printed  { printed: true | false }
+ * Marks an order as printed (or clears the mark). Allowed for approved, assigned, in transit and complete orders.
+ */
+const setOrderPrinted = async (req, res) => {
+  try {
+    await ensurePrintColumns();
+    const id = parseInt(req.params.id);
+    const printed = req.body.printed === true || req.body.printed === 1 || req.body.printed === '1';
+    if (!id) return res.status(400).json({ success: false, error: 'Invalid order id' });
+
+    const [rows] = await db.query('SELECT id, my_status FROM sales_orders WHERE id = ?', [id]);
+    if (!rows.length) return res.status(404).json({ success: false, error: 'Order not found' });
+    // 1 = approved, 2 = assigned, 3 = in transit, 4 = complete
+    const myStatus = Number(rows[0].my_status);
+    if (myStatus < 1 || myStatus > 4) {
+      return res.status(400).json({ success: false, error: 'Only approved, assigned, in transit or complete orders can be marked as printed' });
+    }
+
+    if (printed) {
+      await db.query('UPDATE sales_orders SET is_printed = 1, printed_at = NOW(), printed_by = ? WHERE id = ?', [req.user?.id || null, id]);
+    } else {
+      await db.query('UPDATE sales_orders SET is_printed = 0, printed_at = NULL, printed_by = NULL WHERE id = ?', [id]);
+    }
+
+    const [[row]] = await db.query(
+      `SELECT so.is_printed, so.printed_at, pu.username AS printed_by_name
+       FROM sales_orders so LEFT JOIN users pu ON so.printed_by = pu.id WHERE so.id = ?`,
+      [id]
+    );
+    res.json({ success: true, data: row });
+  } catch (error) {
+    console.error('Error updating printed status:', error);
+    res.status(500).json({ success: false, error: 'Failed to update printed status', details: error.message });
+  }
+};
+
 module.exports = {
-  getCustomerOrdersData
+  getCustomerOrdersData,
+  setOrderPrinted
 };
 
